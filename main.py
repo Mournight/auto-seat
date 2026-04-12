@@ -70,6 +70,7 @@ class BookingApp(tk.Tk):
         self.minsize(600, 750)
         self.target_hwnd = None
         self.running = False  # 是否正在执行任务
+        self.task_cancelled = False  # 任务取消标记
 
         self._setup_ui()
         self._check_config()
@@ -145,6 +146,15 @@ class BookingApp(tk.Tk):
         ttk.Label(info_frame, text=f"默认时段: {config.BOOKING_START_TIME} - {config.BOOKING_END_TIME}").grid(
             row=1, column=1, sticky=tk.W, padx=20, pady=4)
 
+        # ---- 醒目警告提示 ----
+        warning_msg = "⚠️ 重要提示：在 AI 运行期间，请务必保持待操作目标窗口处于前台，不要将其最小化，且尽量不要人为操作鼠标，以免干扰 AI 识别和点击。"
+        self.lbl_warning = tk.Label(
+            frame, text=warning_msg, wraplength=550,
+            foreground="red", font=("Microsoft YaHei", 9, "bold"),
+            justify=tk.LEFT, pady=8
+        )
+        self.lbl_warning.pack(fill=tk.X)
+
         # 窗口锁定区
         win_frame = ttk.LabelFrame(frame, text="目标窗口", padding=8)
         win_frame.pack(fill=tk.X, pady=4)
@@ -212,6 +222,13 @@ class BookingApp(tk.Tk):
             command=lambda: self.start_task(dry_run=False, schedule=True)
         )
         self.btn_schedule.pack(fill=tk.X, padx=4, pady=4)
+
+        self.btn_stop = ttk.Button(
+            act_frame, text="⏹️ 停止并退出当前任务 (包括定时等待)",
+            command=self.stop_task,
+            state=tk.DISABLED
+        )
+        self.btn_stop.pack(fill=tk.X, padx=4, pady=(2, 4))
 
     # ---- 提示词配置标签页 ----
     def _setup_prompt_tab(self):
@@ -407,6 +424,19 @@ class BookingApp(tk.Tk):
         self.ent_end.config(state=state)
         if hasattr(self, 'btn_save_config'):
             self.btn_save_config.config(state=state)
+        
+        # 停止按钮的状态与常规按钮相反
+        if state == tk.DISABLED:
+            self.btn_stop.config(state=tk.NORMAL)
+        else:
+            self.btn_stop.config(state=tk.DISABLED)
+
+    def stop_task(self):
+        """用户点击停止按钮"""
+        if self.running:
+            self.task_cancelled = True
+            logger.info("🛑 收到停止指令，正在尝试安全退出...")
+            self.btn_stop.config(state=tk.DISABLED)
 
     def start_task(self, dry_run: bool, schedule: bool):
         if self.target_hwnd is None:
@@ -419,6 +449,7 @@ class BookingApp(tk.Tk):
             return
 
         self.running = True
+        self.task_cancelled = False
         self.set_buttons_state(tk.DISABLED)
 
         # 解析触发时间
@@ -462,6 +493,8 @@ class BookingApp(tk.Tk):
                 messagebox.showerror("失败",
                     "❌ 流程终止。\n请查看日志，必要时可编辑「提示词配置」标签页中的提示词。"
                 )
+        except InterruptedError:
+            logger.info("⏹️ 任务已手动停止退出。")
         except booking_flow.BookingError as be:
             logger.warning(f"业务中断: {be}")
             messagebox.showwarning("预约失败", str(be))
@@ -486,6 +519,7 @@ class BookingApp(tk.Tk):
 
         preheat_target = target - timedelta(seconds=10)
         while True:
+            if self.task_cancelled: raise InterruptedError("用户手动停止")
             now = datetime.now()
             if now >= preheat_target:
                 break
@@ -493,6 +527,7 @@ class BookingApp(tk.Tk):
 
         logger.info("🔥 进入倒计时 10 秒预热阶段...")
         while datetime.now() < target:
+            if self.task_cancelled: raise InterruptedError("用户手动停止")
             time.sleep(0.01)
 
 

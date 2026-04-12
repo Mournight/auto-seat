@@ -216,6 +216,26 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user_for_help",
+            "description": (
+                "当连续多次尝试依然无法确定当前界面状态或找不到下一步操作目标时调用。"
+                "该工具会弹出一个输入框询问大屏前的人类用户，获取指导建议"
+                "（如明确指出界面上某个元素的方位，或告知发生了什么意外情况）。"
+                "请清楚描述你的疑问和遇到困难的原因。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "你想询问用户的具体问题"},
+                    "reason": {"type": "string", "description": "为什么需要求助（遇到了什么困难）"},
+                },
+                "required": ["question", "reason"],
+            },
+        },
+    },
 ]
 
 
@@ -314,6 +334,35 @@ def _execute_tool(
     elif tool_name in ("task_complete", "task_failed"):
         # 终止信号，由主循环处理
         return "", None
+
+    elif tool_name == "ask_user_for_help":
+        question = args.get("question", "需要您的指导")
+        reason = args.get("reason", "")
+        logger.info(f"[Agent] 🙋 求助用户: {question} (原因: {reason})")
+        
+        import tkinter as tk
+        from tkinter import simpledialog
+        
+        def _ask():
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            try:
+                import ctypes
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                pass
+            ans = simpledialog.askstring("AI 需要帮助", f"原因: {reason}\n\n问题: {question}", parent=root)
+            root.destroy()
+            return ans
+            
+        user_reply = _ask()
+        if user_reply:
+            logger.info(f"[Agent] 👤 用户答复: {user_reply}")
+            return f"用户答复了你的问题: {user_reply}。请紧密遵循该指导继续你的任务。", None
+        else:
+            logger.warning("[Agent] 👤 用户取消了输入或未给出有效答复")
+            return "用户未给出答复（或关闭了窗口）。请尝试重新分析当前截图或者通过你已知的规则进行重试/盲猜。", None
 
     return f"未知工具: {tool_name}", None
 
