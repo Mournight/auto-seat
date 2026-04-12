@@ -230,6 +230,12 @@ class BookingApp(tk.Tk):
         )
         self.btn_stop.pack(fill=tk.X, padx=4, pady=(2, 4))
 
+        self.btn_clear = ttk.Button(
+            act_frame, text="🧹 清理任务截图缓存 (screenshots 目录)",
+            command=self._clear_screenshots
+        )
+        self.btn_clear.pack(fill=tk.X, padx=4, pady=4)
+
     # ---- 提示词配置标签页 ----
     def _setup_prompt_tab(self):
         frame = self.tab_prompt
@@ -437,6 +443,38 @@ class BookingApp(tk.Tk):
             self.task_cancelled = True
             logger.info("🛑 收到停止指令，正在尝试安全退出...")
             self.btn_stop.config(state=tk.DISABLED)
+
+    def _clear_screenshots(self):
+        """清理 screenshots 目录下的所有图片文件"""
+        folder = "screenshots"
+        if not os.path.exists(folder):
+            messagebox.showinfo("提示", f"未找到 {folder} 目录。")
+            return
+
+        files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        if not files:
+            messagebox.showinfo("提示", "截图目录已空，无需清理。")
+            return
+
+        if not messagebox.askyesno("确认清理", f"找到 {len(files)} 个截图文件，是否确认全部删除？\n此操作不可撤销。"):
+            return
+
+        count = 0
+        errors = 0
+        for f in files:
+            try:
+                os.remove(os.path.join(folder, f))
+                count += 1
+            except Exception as e:
+                logger.error(f"删除文件 {f} 失败: {e}")
+                errors += 1
+
+        msg = f"✅ 清理完成！已成功删除 {count} 个文件。"
+        if errors > 0:
+            msg += f"\n注：有 {errors} 个文件删除失败（可能正在被占用）。"
+        
+        logger.info(msg)
+        messagebox.showinfo("清理结果", msg)
 
     def start_task(self, dry_run: bool, schedule: bool):
         if self.target_hwnd is None:
