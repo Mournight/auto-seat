@@ -24,14 +24,22 @@ AGENT_ENABLE_THINKING = True
 PREFERRED_SEATS = ["120", "121"]
 
 # ==================== 时间配置 ====================
-# 预约开始时间（小时:分钟）- 每天早上 6:00 触发
-TRIGGER_HOUR = 6
-TRIGGER_MINUTE = 0
+# 预约开始时间（小时:分钟）- 每天在此时间点触发
+TRIGGER_TIME = os.getenv("TRIGGER_TIME", "06:00")
+try:
+    _h, _m = TRIGGER_TIME.split(":")
+    TRIGGER_HOUR = int(_h)
+    TRIGGER_MINUTE = int(_m)
+except Exception:
+    TRIGGER_HOUR = 6
+    TRIGGER_MINUTE = 0
 
 # 预约的时间段（开始时间 -> 结束时间）
 # 根据你截图中看到的可选时间段，设置你需要预约的时间
-BOOKING_START_TIME = "8:00"   # 开始时间，如 "8:00"
-BOOKING_END_TIME = "22:00"    # 结束时间，如 "22:00"
+BOOKING_START_TIME = os.getenv("BOOKING_START_TIME", "08:00")
+BOOKING_END_TIME = os.getenv("BOOKING_END_TIME", "22:00")
+
+
 
 # ==================== 重试配置 ====================
 MAX_RETRY_TIMES = 3           # 每步操作最大重试次数

@@ -18,7 +18,7 @@ import io
 PW_RENDERFULLCONTENT = 0x00000002  # PrintWindow 渲染完整内容（包括 WebView）
 
 
-def pick_window_by_click(prompt: str = "请在 3 秒内单击要控制的微信小程序窗口...") -> int:
+def pick_window_by_click(prompt: str = "请在 3 秒内单击要控制的窗口...") -> int:
     """
     弹出提示，等待用户鼠标点击，返回被点击位置的顶层窗口 HWND。
 
