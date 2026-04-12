@@ -14,6 +14,11 @@ API_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 # qwen3.5-plus 是 Qwen3.5 系列商业版，原生支持图像输入（2026 年 2 月发布）
 MODEL_NAME = "qwen3.5-plus"
 
+# 是否开启 AI 思考模式（enable_thinking）
+# True  = 模型在选择工具前先推理，决策质量更高，但每步约多 3-10 秒
+# False = 直接输出工具调用，速度快，适合网络好/情况简单的预约场景
+AGENT_ENABLE_THINKING = True
+
 # ==================== 座位偏好配置 ====================
 # 优先座位列表，从左到右优先级递减
 PREFERRED_SEATS = ["120", "121"]
