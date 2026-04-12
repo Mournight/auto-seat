@@ -3,9 +3,11 @@
 新增：AI 提示词配置标签页，支持实时编辑、保存和恢复默认。
 """
 import os
-import sys
+# 强制开启 Python 的 UTF-8 模式，解决 Windows 常见的 ASCII 编码报错
+os.environ["PYTHONUTF8"] = "1"
 
-import time
+import sys
+import io
 import logging
 import threading
 import tkinter as tk
@@ -20,6 +22,12 @@ import config
 import window_ctrl
 import booking_flow
 import agent  # 用于提示词的 load_prompt / save_prompt / DEFAULT_SYSTEM_PROMPT
+
+# 强制设置系统输出编码为 UTF-8，防止在 Windows 环境下因控制台/输出流默认 ASCII 导致的编码错误
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # ============================================================
 # 日志配置（同时输出到控制台、文件和 GUI）
@@ -49,6 +57,10 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ]
 )
+# 抑制 httpx 和 httpcore 的调试日志，防止其在尝试输出含中文的请求包时因编码问题崩溃
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logger = logging.getLogger("main")
 
 
