@@ -9,7 +9,7 @@ import time
 import logging
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, simpledialog
 import win32api
 import win32gui
 import win32con
@@ -73,22 +73,7 @@ class BookingApp(tk.Tk):
         self.task_cancelled = False  # 任务取消标记
 
         self._setup_ui()
-        self._check_config()
         logger.info("程序启动，请先锁定目标窗口。")
-
-    def _check_config(self):
-        """检查必要配置，如果缺失则引导用户"""
-        if not config.API_KEY or config.API_KEY == "在这里输入您的API密钥":
-            msg = (
-                "检测到未设置 API 密钥！\n\n"
-                "引导步骤：\n"
-                "1. 在项目根目录找到 .env.example 文件\n"
-                "2. 将其复制并重命名为 .env\n"
-                "3. 打开 .env 文件，填入您的阿里云 DashScope API Key\n\n"
-                "如果不设置密钥，视觉识别功能将无法工作。"
-            )
-            messagebox.showwarning("缺少配置", msg)
-            logger.warning("未检测到 API_KEY，请按照弹窗指引配置 .env 文件。")
 
     # ============================================================
     # UI 构建
@@ -569,6 +554,75 @@ class BookingApp(tk.Tk):
             time.sleep(0.01)
 
 
+def ensure_api_key():
+    """启动前检查 API Key，缺失则阻塞式弹窗要求输入并保存至 .env"""
+    # 尝试开启高分屏适配（避免对话框模糊）
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+    # 检查是否已有配置
+    key = config.API_KEY
+    if key and key.strip() and key != "在这里输入您的API密钥":
+        return True
+
+    # 初始化一个隐藏的临时 root 用于对话框
+    root = tk.Tk()
+    root.withdraw()
+    
+    new_key = simpledialog.askstring(
+        "初始化配置", 
+        "检测到未配置阿里云 DashScope API Key。\n"
+        "视觉识别功能必须有 Key 才能运行。\n\n"
+        "请输入您的 API Key:",
+        show='*'
+    )
+
+    if not new_key or not new_key.strip():
+        messagebox.showwarning("设置取消", "未输入 API Key，程序将退出。")
+        root.destroy()
+        return False
+
+    # 保存到 .env 文件
+    env_path = ".env"
+    try:
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        
+        found = False
+        new_lines = []
+        key_line = f'API_KEY="{new_key.strip()}"\n'
+        for line in lines:
+            if line.strip().startswith("API_KEY="):
+                new_lines.append(key_line)
+                found = True
+            else:
+                new_lines.append(line)
+        
+        if not found:
+            # 如果文件末尾没有换行，先补一个
+            if lines and not lines[-1].endswith('\n'):
+                new_lines.append('\n')
+            new_lines.append(key_line)
+            
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+            
+        # 更新内存中的配置
+        config.API_KEY = new_key.strip()
+        messagebox.showinfo("成功", f"API Key 已保存至 {os.path.abspath(env_path)}\n程序即将正常启动。")
+        root.destroy()
+        return True
+    except Exception as e:
+        messagebox.showerror("保存失败", f"无法写入配置文件：\n{e}")
+        root.destroy()
+        return False
+
+
 if __name__ == "__main__":
-    app = BookingApp()
-    app.mainloop()
+    if ensure_api_key():
+        app = BookingApp()
+        app.mainloop()
