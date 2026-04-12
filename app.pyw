@@ -8,6 +8,7 @@ os.environ["PYTHONUTF8"] = "1"
 
 import sys
 import io
+import time
 import logging
 import threading
 import tkinter as tk
