@@ -56,7 +56,22 @@ class BookingApp(tk.Tk):
         self.running = False  # 是否正在执行任务
 
         self._setup_ui()
+        self._check_config()
         logger.info("程序启动，请先锁定目标窗口。")
+
+    def _check_config(self):
+        """检查必要配置，如果缺失则引导用户"""
+        if not config.API_KEY or config.API_KEY == "在这里输入您的API密钥":
+            msg = (
+                "检测到未设置 API 密钥！\n\n"
+                "引导步骤：\n"
+                "1. 在项目根目录找到 .env.example 文件\n"
+                "2. 将其复制并重命名为 .env\n"
+                "3. 打开 .env 文件，填入您的阿里云 DashScope API Key\n\n"
+                "如果不设置密钥，视觉识别功能将无法工作。"
+            )
+            messagebox.showwarning("缺少配置", msg)
+            logger.warning("未检测到 API_KEY，请按照弹窗指引配置 .env 文件。")
 
     def _setup_ui(self):
         style = ttk.Style(self)
