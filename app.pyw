@@ -23,11 +23,12 @@ import window_ctrl
 import booking_flow
 import agent  # 用于提示词的 load_prompt / save_prompt / DEFAULT_SYSTEM_PROMPT
 
-# 强制设置系统输出编码为 UTF-8，防止在 Windows 环境下因控制台/输出流默认 ASCII 导致的编码错误
-if sys.platform == "win32":
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+# 仅在有真实控制台（python.exe）时才重定向输出流编码；
+# pythonw.exe 运行时 sys.stdout/stderr 为 None，须跳过，否则会静默闪退。
+if sys.platform == "win32" and sys.stdout is not None and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.platform == "win32" and sys.stderr is not None and hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # ============================================================
 # 日志配置（同时输出到控制台、文件和 GUI）
