@@ -490,8 +490,8 @@ def run_agent(
                 extra_body={"enable_thinking": config.AGENT_ENABLE_THINKING},
                 max_tokens=2048,
             )
-        except Exception as e:
-            logger.error(f"[Agent] API 调用失败: {e}")
+        except Exception:
+            logger.exception("[Agent] API 调用失败")
             return False
 
         ai_message = response.choices[0].message
