@@ -1,5 +1,6 @@
 """
-主入口 (GUI 界面) - 自习室自动预约机器人
+主入口 (GUI 界面) - 自习室自动预约机器人 v2.0
+新增：AI 提示词配置标签页，支持实时编辑、保存和恢复默认。
 """
 import sys
 import time
@@ -15,6 +16,7 @@ from datetime import datetime, timedelta
 import config
 import window_ctrl
 import booking_flow
+import agent  # 用于提示词的 load_prompt / save_prompt / DEFAULT_SYSTEM_PROMPT
 
 # ============================================================
 # 日志配置（同时输出到控制台、文件和 GUI）
@@ -50,14 +52,15 @@ logger = logging.getLogger("main")
 class BookingApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("自习室自动预约机器人 v1.1 - GUI 版")
-        self.geometry("580x620")
+        self.title("自习室自动预约机器人 v2.0 - AI Agent 版")
+        self.geometry("620x780")
+        self.minsize(580, 700)
         self.target_hwnd = None
         self.running = False  # 是否正在执行任务
 
         self._setup_ui()
         self._check_config()
-        logger.info("程序启动，请先锁定目标窗口。")
+        logger.info("程序启动（v2.0 Agent 模式），请先锁定目标窗口。")
 
     def _check_config(self):
         """检查必要配置，如果缺失则引导用户"""
@@ -73,32 +76,81 @@ class BookingApp(tk.Tk):
             messagebox.showwarning("缺少配置", msg)
             logger.warning("未检测到 API_KEY，请按照弹窗指引配置 .env 文件。")
 
+    # ============================================================
+    # UI 构建
+    # ============================================================
     def _setup_ui(self):
         style = ttk.Style(self)
         style.theme_use('clam')
 
-        # 顶部信息取
-        info_frame = ttk.LabelFrame(self, text="配置信息", padding=10)
-        info_frame.pack(fill=tk.X, padx=10, pady=10)
-        
+        # ---- 主 Notebook（标签页） ----
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill=tk.BOTH, expand=False, padx=8, pady=(8, 4))
+
+        self.tab_main   = ttk.Frame(self.notebook, padding=4)
+        self.tab_prompt = ttk.Frame(self.notebook, padding=4)
+
+        self.notebook.add(self.tab_main,   text="🤖  预约控制")
+        self.notebook.add(self.tab_prompt, text="📝  提示词配置")
+
+        self._setup_main_tab()
+        self._setup_prompt_tab()
+
+        # ---- 日志区（在 Notebook 外、全局共享）----
+        log_frame = ttk.LabelFrame(self, text="运行日志", padding=6)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        self.txt_log = scrolledtext.ScrolledText(
+            log_frame, state='disabled',
+            font=("Consolas", 9), height=12
+        )
+        self.txt_log.pack(fill=tk.BOTH, expand=True)
+
+        # 将日志绑定到 Text 控件
+        gui_handler = TextHandler(self.txt_log)
+        gui_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
+        logging.getLogger().addHandler(gui_handler)
+
+    # ---- 预约控制标签页 ----
+    def _setup_main_tab(self):
+        frame = self.tab_main
+
+        # 顶部配置信息
+        info_frame = ttk.LabelFrame(frame, text="当前配置", padding=8)
+        info_frame.pack(fill=tk.X, pady=(4, 4))
+
         ttk.Label(info_frame, text=f"模型: {config.MODEL_NAME}").grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(info_frame, text=f"座位: {' -> '.join(config.PREFERRED_SEATS)}").grid(row=0, column=1, sticky=tk.W, padx=20)
-        ttk.Label(info_frame, text=f"触发时间: {config.TRIGGER_HOUR:02d}:{config.TRIGGER_MINUTE:02d}").grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Label(info_frame, text=f"预约时段: {config.BOOKING_START_TIME} - {config.BOOKING_END_TIME}").grid(row=1, column=1, sticky=tk.W, padx=20, pady=5)
+        ttk.Label(info_frame, text=f"座位: {' -> '.join(config.PREFERRED_SEATS)}").grid(
+            row=0, column=1, sticky=tk.W, padx=20)
+
+        thinking_text = "思考模式: ✅ 开启" if config.AGENT_ENABLE_THINKING else "思考模式: ⚡ 关闭(快速)"
+        ttk.Label(info_frame, text=thinking_text, foreground="#2a7a2a" if config.AGENT_ENABLE_THINKING else "#888").grid(
+            row=0, column=2, sticky=tk.W, padx=10)
+
+        ttk.Label(info_frame, text=f"触发时间: {config.TRIGGER_HOUR:02d}:{config.TRIGGER_MINUTE:02d}").grid(
+            row=1, column=0, sticky=tk.W, pady=4)
+        ttk.Label(info_frame, text=f"默认时段: {config.BOOKING_START_TIME} - {config.BOOKING_END_TIME}").grid(
+            row=1, column=1, sticky=tk.W, padx=20, pady=4)
 
         # 窗口锁定区
-        win_frame = ttk.LabelFrame(self, text="目标窗口", padding=10)
-        win_frame.pack(fill=tk.X, padx=10, pady=5)
+        win_frame = ttk.LabelFrame(frame, text="目标窗口", padding=8)
+        win_frame.pack(fill=tk.X, pady=4)
 
-        self.lbl_window = ttk.Label(win_frame, text="【未锁定】请点击下方按钮选择", foreground="red", font=("Microsoft YaHei", 10, "bold"))
+        self.lbl_window = ttk.Label(
+            win_frame, text="【未锁定】请点击下方按钮选择",
+            foreground="red", font=("Microsoft YaHei", 10, "bold")
+        )
         self.lbl_window.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self.btn_select = ttk.Button(win_frame, text="🎯 手动点击锁定窗口", command=self.start_window_selection)
+        self.btn_select = ttk.Button(
+            win_frame, text="🎯 手动点击锁定窗口",
+            command=self.start_window_selection
+        )
         self.btn_select.pack(side=tk.RIGHT)
 
         # 预约时间配置区
-        time_frame = ttk.LabelFrame(self, text="预约时间", padding=10)
-        time_frame.pack(fill=tk.X, padx=10, pady=5)
+        time_frame = ttk.LabelFrame(frame, text="本次预约时间", padding=8)
+        time_frame.pack(fill=tk.X, pady=4)
 
         ttk.Label(time_frame, text="开始时间:").grid(row=0, column=0, sticky=tk.W)
         self.ent_start = ttk.Entry(time_frame, width=10)
@@ -110,39 +162,125 @@ class BookingApp(tk.Tk):
         self.ent_end.insert(0, config.BOOKING_END_TIME)
         self.ent_end.grid(row=0, column=3, sticky=tk.W, padx=4)
 
-        ttk.Label(time_frame, text="（示例：8:00 和 22:00）",
-                  foreground="gray").grid(row=0, column=4, sticky=tk.W, padx=10)
+        ttk.Label(
+            time_frame, text="（示例：8:00 和 22:00）",
+            foreground="gray"
+        ).grid(row=0, column=4, sticky=tk.W, padx=10)
 
         # 操作区
-        act_frame = ttk.LabelFrame(self, text="操作", padding=10)
-        act_frame.pack(fill=tk.X, padx=10, pady=5)
+        act_frame = ttk.LabelFrame(frame, text="操作", padding=8)
+        act_frame.pack(fill=tk.X, pady=4)
 
-        self.btn_test = ttk.Button(act_frame, text="🛠️ 立即测试 (步骤1~7真实点,步骤8停下)", command=lambda: self.start_task(dry_run=True, schedule=False))
-        self.btn_test.pack(fill=tk.X, padx=5, pady=2)
+        self.btn_test = ttk.Button(
+            act_frame, text="🛠️ 立即测试（执行全流程，最后一步不提交）",
+            command=lambda: self.start_task(dry_run=True, schedule=False)
+        )
+        self.btn_test.pack(fill=tk.X, padx=4, pady=2)
 
         btn_row2 = ttk.Frame(act_frame)
         btn_row2.pack(fill=tk.X, pady=2)
-        self.btn_real = ttk.Button(btn_row2, text="🔴 立即正式预约", command=lambda: self.start_task(dry_run=False, schedule=False))
-        self.btn_real.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
-        self.btn_schedule = ttk.Button(btn_row2, text="⏰ 开始定时自动预约 (正式)", command=lambda: self.start_task(dry_run=False, schedule=True))
-        self.btn_schedule.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.btn_real = ttk.Button(
+            btn_row2, text="🔴 立即正式预约",
+            command=lambda: self.start_task(dry_run=False, schedule=False)
+        )
+        self.btn_real.pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
 
-        # 日志输出区
-        log_frame = ttk.LabelFrame(self, text="运行日志", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.btn_schedule = ttk.Button(
+            btn_row2, text="⏰ 开始定时自动预约（正式）",
+            command=lambda: self.start_task(dry_run=False, schedule=True)
+        )
+        self.btn_schedule.pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
 
-        self.txt_log = scrolledtext.ScrolledText(log_frame, state='disabled', font=("Consolas", 9))
-        self.txt_log.pack(fill=tk.BOTH, expand=True)
-        
-        # 将日志绑定到 Text 控件
-        gui_handler = TextHandler(self.txt_log)
-        gui_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
-        logging.getLogger().addHandler(gui_handler)
+    # ---- 提示词配置标签页 ----
+    def _setup_prompt_tab(self):
+        frame = self.tab_prompt
 
-    # ------------------ 窗口抓取逻辑 ------------------
+        # 说明提示
+        hint = (
+            "在下方编辑 AI 的系统提示词（System Prompt）。\n"
+            "提示词中可使用以下占位符，运行时会自动替换：\n"
+            "  {seat1}   → 优先座位编号        {seat2}   → 备选座位编号\n"
+            "  {start_time} → 预约开始时间     {end_time} → 预约结束时间\n"
+            "• 不同学校/楼栋的座位图布局不同，请根据实际情况修改步骤描述。\n"
+            "• 保存后下次点击「预约」时立刻生效，无需重启程序。"
+        )
+        lbl_hint = ttk.Label(
+            frame, text=hint, justify=tk.LEFT,
+            foreground="#444", font=("Microsoft YaHei", 9),
+            relief="groove", padding=8
+        )
+        lbl_hint.pack(fill=tk.X, pady=(4, 6))
+
+        # 提示词文本编辑器
+        self.txt_prompt = scrolledtext.ScrolledText(
+            frame, font=("Consolas", 9),
+            wrap=tk.WORD, undo=True, height=18
+        )
+        self.txt_prompt.pack(fill=tk.BOTH, expand=True)
+
+        # 加载当前提示词
+        current_prompt = agent.load_prompt()
+        self.txt_prompt.insert("1.0", current_prompt)
+
+        # 按钮行
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(6, 4))
+
+        ttk.Button(
+            btn_frame, text="💾  保存提示词",
+            command=self._save_prompt
+        ).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(
+            btn_frame, text="🔄  恢复内置默认",
+            command=self._reset_prompt
+        ).pack(side=tk.LEFT, padx=4)
+
+        # 右侧文件路径提示
+        import os
+        ttk.Label(
+            btn_frame,
+            text=f"保存路径: system_prompt.txt",
+            foreground="gray", font=("Microsoft YaHei", 8)
+        ).pack(side=tk.RIGHT, padx=8)
+
+    def _save_prompt(self):
+        """保存提示词编辑器中的内容到文件"""
+        text = self.txt_prompt.get("1.0", tk.END).strip()
+        if not text:
+            messagebox.showwarning("提示", "提示词不能为空！")
+            return
+        if agent.save_prompt(text):
+            messagebox.showinfo("保存成功", "✅ 提示词已保存！\n下次点击预约按钮时立刻生效。")
+            logger.info("用户已保存自定义提示词")
+        else:
+            messagebox.showerror("保存失败", "❌ 写入文件失败，请检查目录权限。")
+
+    def _reset_prompt(self):
+        """恢复内置默认提示词（覆盖编辑器内容，并自动保存）"""
+        if not messagebox.askyesno(
+            "确认恢复", "此操作将用内置默认提示词覆盖编辑器中的内容，是否继续？"
+        ):
+            return
+        self.txt_prompt.delete("1.0", tk.END)
+        self.txt_prompt.insert("1.0", agent.DEFAULT_SYSTEM_PROMPT)
+        # 同时删除文件，让 load_prompt 下次退回默认
+        import os
+        if os.path.exists(agent.PROMPT_FILE):
+            try:
+                os.remove(agent.PROMPT_FILE)
+            except Exception as e:
+                logger.warning(f"删除提示词文件失败: {e}")
+        logger.info("已恢复内置默认提示词")
+        messagebox.showinfo("已恢复", "✅ 已恢复内置默认提示词。")
+
+    # ============================================================
+    # 窗口抓取逻辑
+    # ============================================================
     def start_window_selection(self):
-        if self.running: return
+        if self.running:
+            return
         self.target_hwnd = None
         self.lbl_window.config(text="请移动鼠标并【单击】微信小程序窗口...", foreground="blue")
         self.btn_select.config(state=tk.DISABLED)
@@ -159,14 +297,10 @@ class BookingApp(tk.Tk):
     def _wait_mouse_click(self):
         """轮询等待下一次鼠标单击"""
         if win32api.GetAsyncKeyState(win32con.VK_LBUTTON) < 0:
-            # 拿到坐标
             x, y = win32api.GetCursorPos()
-            # 获取最初拿到的句柄
             hwnd = win32gui.WindowFromPoint((x, y))
-            # 向上找到顶层父窗口
             root_hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
-            
-            # 过滤掉桌面本身或自身重合
+
             title = win32gui.GetWindowText(root_hwnd).strip()
             rect = win32gui.GetWindowRect(root_hwnd)
             w = rect[2] - rect[0]
@@ -175,22 +309,23 @@ class BookingApp(tk.Tk):
             self.target_hwnd = root_hwnd
             title_disp = title if title else "无标题"
             self.lbl_window.config(
-                text=f"【已锁定】{title_disp} (句柄: {root_hwnd}, 尺寸: {w}x{h})", 
+                text=f"【已锁定】{title_disp} (句柄: {root_hwnd}, 尺寸: {w}x{h})",
                 foreground="green"
             )
             self.btn_select.config(state=tk.NORMAL)
             logger.info(f"成功锁定窗口: {title_disp} ({w}x{h}) HWND={root_hwnd}")
-            
-            # 如果不小心选到了任务栏（高度极小但宽度极宽），给个警告
+
             if w > 1920 and h <= 50:
-                logger.warning("⚠️ 警告：您选中的窗口极宽且极矮，可能是 Windows 任务栏！请重新选择微信小程序窗口。")
-                messagebox.showwarning("选中错误的窗口？", "您似乎选到了任务栏。请关闭此对话框后，点击【重新选择窗口】，然后明确地点在微信小程序界面中间。")
+                logger.warning("⚠️ 警告：您选中的窗口极宽且极矮，可能是 Windows 任务栏！")
+                messagebox.showwarning("选中错误的窗口？",
+                    "您似乎选到了任务栏。请关闭此对话框后，点击【重新选择窗口】，\n"
+                    "然后明确地点在微信小程序界面中间。")
         else:
-            # 继续轮询
             self.after(50, self._wait_mouse_click)
 
-
-    # ------------------ 任务控制逻辑 ------------------
+    # ============================================================
+    # 任务控制逻辑
+    # ============================================================
     def set_buttons_state(self, state):
         self.btn_select.config(state=state)
         self.btn_test.config(state=state)
@@ -201,16 +336,19 @@ class BookingApp(tk.Tk):
 
     def start_task(self, dry_run: bool, schedule: bool):
         if self.target_hwnd is None:
-            messagebox.showerror("未锁定窗口", "请先点击【🎯 手动点击锁定窗口】，并在微信小程序内单击确认！")
+            messagebox.showerror(
+                "未锁定窗口",
+                "请先点击【🎯 手动点击锁定窗口】，并在微信小程序内单击确认！"
+            )
             return
         if self.running:
             return
 
         self.running = True
         self.set_buttons_state(tk.DISABLED)
-        
-        # 启动后台线程执行，避免卡死 GUI
-        threading.Thread(target=self._task_thread, args=(dry_run, schedule), daemon=True).start()
+        threading.Thread(
+            target=self._task_thread, args=(dry_run, schedule), daemon=True
+        ).start()
 
     def _task_thread(self, dry_run: bool, use_schedule: bool):
         try:
@@ -220,7 +358,6 @@ class BookingApp(tk.Tk):
             logger.info("=" * 40)
             logger.info(f"开始执行预约流程 [{'DRY_RUN(测试)' if dry_run else '正式提交'}]")
 
-            # 读取 GUI 里用户设置的时间
             start_time = self.ent_start.get().strip() or config.BOOKING_START_TIME
             end_time   = self.ent_end.get().strip()   or config.BOOKING_END_TIME
             logger.info(f"预约时间段: {start_time} ~ {end_time}")
@@ -234,10 +371,15 @@ class BookingApp(tk.Tk):
 
             if success:
                 logger.info("✅ 流程正常结束！")
-                messagebox.showinfo("成功", "✅ 预约流程顺利完成（测试模式请检查日志，正式模式请确认结果）！")
+                messagebox.showinfo("成功",
+                    "✅ 预约流程顺利完成！\n"
+                    "（测试模式请检查日志；正式模式请在小程序中确认结果）"
+                )
             else:
-                logger.error("❌ 流程抛锚，请查看 screenshots/ 目录排查 AI 识别失败在哪一步。")
-                messagebox.showerror("失败", "❌ 流程终止，可能有截图未正确识别，详见日志！")
+                logger.error("❌ 流程未能完成，请查看日志和 screenshots/ 目录排查原因。")
+                messagebox.showerror("失败",
+                    "❌ 流程终止。\n请查看日志，必要时可编辑「提示词配置」标签页中的提示词。"
+                )
         except booking_flow.BookingError as be:
             logger.warning(f"业务中断: {be}")
             messagebox.showwarning("预约失败", str(be))
@@ -246,33 +388,31 @@ class BookingApp(tk.Tk):
             messagebox.showerror("系统异常", f"运行中发生未知错误:\n{e}")
         finally:
             self.running = False
-            # 恢复 GUI 按钮
             self.after(0, lambda: self.set_buttons_state(tk.NORMAL))
 
     def _wait_until_trigger(self):
-        """阻塞等待至明早或今早 6:00 """
+        """阻塞等待至触发时间"""
         target = datetime.now().replace(
-            hour=config.TRIGGER_HOUR, 
-            minute=config.TRIGGER_MINUTE, 
+            hour=config.TRIGGER_HOUR,
+            minute=config.TRIGGER_MINUTE,
             second=0, microsecond=0
         )
         if datetime.now() >= target:
             target += timedelta(days=1)
 
         logger.info(f"⏰ 进入定时模式，等待至 {target.strftime('%H:%M:%S')} ...")
-        
+
         preheat_target = target - timedelta(seconds=10)
-        
-        # 长时间等待循环（带阻断检查，方便以后如果做退出功能）
         while True:
             now = datetime.now()
             if now >= preheat_target:
                 break
             time.sleep(1)
-            
+
         logger.info("🔥 进入倒计时 10 秒预热阶段...")
         while datetime.now() < target:
             time.sleep(0.01)
+
 
 if __name__ == "__main__":
     app = BookingApp()
