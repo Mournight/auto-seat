@@ -20,8 +20,62 @@ MODEL_NAME = "qwen3.5-plus"
 AGENT_ENABLE_THINKING = True
 
 # ==================== 座位偏好配置 ====================
-# 优先座位列表，从左到右优先级递减
-PREFERRED_SEATS = ["120", "121"]
+def _parse_seat_list(raw: str | None) -> list[str]:
+    """解析座位字符串（逗号/空格分隔），并去重保序。"""
+    if not raw:
+        return []
+    normalized = raw.replace("，", ",").replace("、", ",").replace(" ", ",")
+    seats = [s.strip() for s in normalized.split(",") if s.strip()]
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for s in seats:
+        if s not in seen:
+            uniq.append(s)
+            seen.add(s)
+    return uniq
+
+
+# 座位策略：
+# - list  = 按优先级使用具体座位列表（PREFERRED_SEATS）
+# - range = 使用连续座位段（SEAT_RANGE_START ~ SEAT_RANGE_END）
+SEAT_MODE = os.getenv("SEAT_MODE", "list").strip().lower()
+if SEAT_MODE not in ("list", "range"):
+    SEAT_MODE = "list"
+
+_env_preferred = _parse_seat_list(os.getenv("PREFERRED_SEATS"))
+PREFERRED_SEATS = _env_preferred if _env_preferred else ["120", "121"]
+
+SEAT_RANGE_START = os.getenv("SEAT_RANGE_START", "").strip()
+SEAT_RANGE_END = os.getenv("SEAT_RANGE_END", "").strip()
+
+# 连续座位段最大长度，防止一次注入过长目标列表导致提示词膨胀
+MAX_SEAT_RANGE_SPAN = 300
+
+
+def get_target_seats() -> list[str]:
+    """根据当前座位策略，返回最终目标座位列表。"""
+    if SEAT_MODE == "range":
+        if SEAT_RANGE_START.isdigit() and SEAT_RANGE_END.isdigit():
+            start = int(SEAT_RANGE_START)
+            end = int(SEAT_RANGE_END)
+            if start > end:
+                start, end = end, start
+            end = min(end, start + MAX_SEAT_RANGE_SPAN - 1)
+            return [str(x) for x in range(start, end + 1)]
+        # 座位段配置非法时回退到列表，避免运行期直接空配置
+        return PREFERRED_SEATS
+    return PREFERRED_SEATS
+
+
+def get_seat_display_text() -> str:
+    """生成用于 UI 显示的座位策略摘要。"""
+    if SEAT_MODE == "range":
+        if SEAT_RANGE_START and SEAT_RANGE_END:
+            return f"座位段: {SEAT_RANGE_START}-{SEAT_RANGE_END}"
+        return "座位段: 未完整配置"
+    if not PREFERRED_SEATS:
+        return "座位列表: 未配置"
+    return f"座位列表: {' -> '.join(PREFERRED_SEATS)}"
 
 # ==================== 时间配置 ====================
 # 预约开始时间（小时:分钟）- 每天在此时间点触发
