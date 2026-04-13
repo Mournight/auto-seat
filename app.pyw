@@ -517,6 +517,7 @@ class BookingApp(tk.Tk):
                 dry_run=dry_run,
                 start_time=start_time,
                 end_time=end_time,
+                should_cancel=lambda: self.task_cancelled,
             )
 
             if success:
