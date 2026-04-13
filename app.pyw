@@ -12,7 +12,7 @@ import time
 import logging
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext, simpledialog
+from tkinter import ttk, messagebox, scrolledtext
 import win32api
 import win32gui
 import win32con
@@ -585,14 +585,79 @@ def ensure_api_key():
     # 初始化一个隐藏的临时 root 用于对话框
     root = tk.Tk()
     root.withdraw()
-    
-    new_key = simpledialog.askstring(
-        "初始化配置", 
-        "检测到未配置阿里云 DashScope API Key。\n"
-        "视觉识别功能必须有 Key 才能运行。\n\n"
-        "请输入您的 API Key:",
-        show='*'
+
+    new_key = None
+
+    dialog = tk.Toplevel(root)
+    dialog.title("初始化配置")
+    dialog.resizable(False, False)
+    dialog.attributes("-topmost", True)
+    dialog.transient(root)
+
+    container = ttk.Frame(dialog, padding=16)
+    container.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(
+        container,
+        text="检测到未配置阿里云 DashScope API Key。\n视觉识别功能必须有 Key 才能运行。",
+        justify=tk.LEFT,
+        wraplength=480,
+    ).pack(anchor=tk.W, fill=tk.X)
+
+    ttk.Label(container, text="请输入您的 API Key：").pack(anchor=tk.W, pady=(12, 4))
+
+    entry_var = tk.StringVar()
+    entry = ttk.Entry(container, textvariable=entry_var, show="*", width=48)
+    entry.pack(fill=tk.X)
+    entry.focus_set()
+
+    disclaimer_text = (
+        "免责声明与提醒：\n"
+        "本程序会基于 AI 视觉识别和自动点击执行操作，模型判断并不稳定，结果也无法保证完全正确。\n"
+        "运行过程中可能出现误识别、误点击、重复尝试、卡顿或任务失败等情况。\n"
+        "如果你不能接受这些可能的风险，请立即退出，不要继续配置或运行。\n"
+        "使用时请保持目标窗口在前台，尽量不要手动干预鼠标和键盘，以免影响执行结果。"
     )
+    ttk.Label(
+        container,
+        text=disclaimer_text,
+        foreground="#a33",
+        justify=tk.LEFT,
+        wraplength=480,
+    ).pack(anchor=tk.W, fill=tk.X, pady=(12, 0))
+
+    button_row = ttk.Frame(container)
+    button_row.pack(fill=tk.X, pady=(16, 0))
+
+    result = {"value": None}
+
+    def _confirm():
+        value = entry_var.get().strip()
+        if not value:
+            messagebox.showwarning("提示", "请输入 API Key 后再继续。", parent=dialog)
+            return
+        result["value"] = value
+        dialog.destroy()
+
+    def _cancel():
+        dialog.destroy()
+
+    ttk.Button(button_row, text="取消", command=_cancel).pack(side=tk.RIGHT, padx=(8, 0))
+    ttk.Button(button_row, text="确认", command=_confirm).pack(side=tk.RIGHT)
+
+    dialog.protocol("WM_DELETE_WINDOW", _cancel)
+    dialog.grab_set()
+    root.update_idletasks()
+
+    dialog.update_idletasks()
+    width = dialog.winfo_reqwidth()
+    height = dialog.winfo_reqheight()
+    x = (dialog.winfo_screenwidth() - width) // 2
+    y = (dialog.winfo_screenheight() - height) // 3
+    dialog.geometry(f"+{x}+{y}")
+
+    root.wait_window(dialog)
+    new_key = result["value"]
 
     if not new_key or not new_key.strip():
         messagebox.showwarning("设置取消", "未输入 API Key，程序将退出。")
