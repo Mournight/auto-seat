@@ -11,10 +11,12 @@ import os
 import io
 import re
 import json
+import math
 import time
 import base64
 import logging
 from datetime import datetime
+from typing import Callable
 from PIL import Image
 from openai import OpenAI
 
@@ -261,9 +263,67 @@ def _save_screenshot(img: Image.Image, label: str):
 
 def _normalize_to_pixel(x_norm: float, y_norm: float, img_w: int, img_h: int) -> tuple[int, int]:
     """归一化坐标（0-1000）转实际像素坐标。"""
-    px = int(x_norm / 999.0 * img_w)
-    py = int(y_norm / 999.0 * img_h)
+    x_norm = max(0.0, min(1000.0, float(x_norm)))
+    y_norm = max(0.0, min(1000.0, float(y_norm)))
+    # 将 0-1000 映射到有效像素索引，避免边界值 1000 落到窗口外。
+    px = int(round(x_norm / 1000.0 * max(0, img_w - 1)))
+    py = int(round(y_norm / 1000.0 * max(0, img_h - 1)))
     return px, py
+
+
+def _is_cancel_requested(should_cancel: Callable[[], bool] | None) -> bool:
+    """查询外部停止标记；回调异常时仅记录日志，不中断主流程。"""
+    if should_cancel is None:
+        return False
+    try:
+        return bool(should_cancel())
+    except Exception as e:
+        logger.warning(f"[Agent] 取消状态检查异常，忽略本次检查: {e}")
+        return False
+
+
+def _check_cancel(should_cancel: Callable[[], bool] | None):
+    """检测到停止请求时抛出 InterruptedError，交给上层统一收尾。"""
+    if _is_cancel_requested(should_cancel):
+        logger.info("[Agent] 🛑 检测到停止请求，终止当前任务")
+        raise InterruptedError("用户手动停止")
+
+
+def _sleep_interruptible(seconds: float, should_cancel: Callable[[], bool] | None):
+    """可中断睡眠，避免等待期间点击停止无响应。"""
+    total = max(0.0, float(seconds))
+    deadline = time.time() + total
+    while True:
+        _check_cancel(should_cancel)
+        remain = deadline - time.time()
+        if remain <= 0:
+            break
+        time.sleep(min(0.1, remain))
+
+
+def _parse_click_coord(value: object, field_name: str) -> int:
+    """将模型返回的 x/y 解析为 0-1000 的整数坐标。"""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} 不能是布尔值")
+
+    if isinstance(value, (int, float)):
+        num = float(value)
+    elif isinstance(value, str):
+        s = value.strip()
+        if not s:
+            raise ValueError(f"{field_name} 不能为空")
+        try:
+            num = float(s)
+        except Exception:
+            raise ValueError(f"{field_name} 不是数字: {value}")
+    else:
+        raise ValueError(f"{field_name} 类型错误: {type(value).__name__}")
+
+    if not math.isfinite(num):
+        raise ValueError(f"{field_name} 不是有限数值")
+    if not (0.0 <= num <= 1000.0):
+        raise ValueError(f"{field_name} 超出范围: {num}，必须在 0-1000")
+    return int(round(num))
 
 
 def _execute_tool(
@@ -272,6 +332,7 @@ def _execute_tool(
     hwnd: int,
     dry_run: bool,
     current_img: Image.Image,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> tuple[str, Image.Image | None]:
     """
     执行 AI 选择的工具。
@@ -280,6 +341,8 @@ def _execute_tool(
         (结果描述字符串, 新截图 Image 或 None)
         如果返回了新截图说明界面已经变化，主循环应使用该截图。
     """
+    _check_cancel(should_cancel)
+
     if tool_name == "click":
         # 参数防御校验：x 或 y 缺失时返回错误描述，让 AI 重试，而不是 KeyError 崩溃
         if "x" not in args or "y" not in args:
@@ -287,7 +350,13 @@ def _execute_tool(
             logger.error(f"[Agent] ⚠️ click 工具缺少参数: {missing}，跳过本次点击")
             return f"错误：click 工具缺少必要参数 {missing}。请重新提供完整的 x、y 坐标（0-1000 整数）。", None
 
-        x, y = int(args["x"]), int(args["y"])
+        try:
+            x = _parse_click_coord(args.get("x"), "x")
+            y = _parse_click_coord(args.get("y"), "y")
+        except ValueError as e:
+            logger.error(f"[Agent] ⚠️ click 坐标无效: x={args.get('x')} y={args.get('y')}，错误: {e}")
+            return f"错误：{e}。请重新提供合法 x、y 坐标（0-1000 数字）。", None
+
         reason = args.get("reason", "")
         logger.info(f"[Agent] 🖱️ 点击 ({x}, {y})  原因：{reason}")
 
@@ -300,25 +369,48 @@ def _execute_tool(
         window_ctrl.post_click(hwnd, px, py)
         # 点击后固定等待 0.8 秒，确保 WebView/下拉框等 UI 元素有足够时间渲染，
         # 避免下一步截图时界面尚未响应而导致 AI 误判"点击无效"
-        time.sleep(0.8)
+        _sleep_interruptible(0.8, should_cancel)
         return f"已点击坐标 ({x}, {y})（像素 {px}, {py}）", None
 
     elif tool_name == "scroll":
-        direction = args["direction"]
-        clicks = int(args.get("clicks", 10))
+        direction = str(args.get("direction", "")).lower()
+        if direction not in ("up", "down"):
+            logger.error(f"[Agent] ⚠️ scroll 参数非法 direction={args.get('direction')}")
+            return "错误：scroll.direction 必须是 up 或 down。", None
+
+        try:
+            clicks = int(float(args.get("clicks", 10)))
+        except Exception:
+            logger.error(f"[Agent] ⚠️ scroll 参数非法 clicks={args.get('clicks')}")
+            return "错误：scroll.clicks 必须是数字。", None
+
+        if clicks <= 0 or clicks > 30:
+            logger.error(f"[Agent] ⚠️ scroll.clicks 超出允许范围: {clicks}")
+            return "错误：scroll.clicks 必须在 1-30 之间。", None
+
         reason = args.get("reason", "")
         logger.info(f"[Agent] 🔄 滚动 {direction} {clicks} 格  原因：{reason}")
         window_ctrl.scroll_window(hwnd, clicks=clicks, direction=direction)
-        time.sleep(1.2)  # 等待 WebView 重绘
+        _sleep_interruptible(1.2, should_cancel)  # 等待 WebView 重绘
+        _check_cancel(should_cancel)
         new_img = window_ctrl.capture_window(hwnd)
         _save_screenshot(new_img, f"scroll_{direction}")
         return f"已向 {direction} 滚动 {clicks} 格，已更新截图", new_img
 
     elif tool_name == "wait_and_capture":
-        seconds = float(args.get("seconds", 1.5))
+        try:
+            seconds = float(args.get("seconds", 1.5))
+        except Exception:
+            logger.error(f"[Agent] ⚠️ wait_and_capture 参数非法 seconds={args.get('seconds')}")
+            return "错误：wait_and_capture.seconds 必须是数字。", None
+        if not math.isfinite(seconds):
+            return "错误：wait_and_capture.seconds 不是有效数值。", None
+        seconds = max(0.0, min(10.0, seconds))
+
         reason = args.get("reason", "")
         logger.info(f"[Agent] ⏳ 等待 {seconds}s  原因：{reason}")
-        time.sleep(seconds)
+        _sleep_interruptible(seconds, should_cancel)
+        _check_cancel(should_cancel)
         new_img = window_ctrl.capture_window(hwnd)
         _save_screenshot(new_img, "wait_capture")
         return f"已等待 {seconds}s 并重新截图", new_img
@@ -382,6 +474,7 @@ def run_agent(
     start_time: str | None = None,
     end_time: str | None = None,
     max_steps: int = 30,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> bool:
     """
     启动 Agent 主循环，让 AI 自主完成预约全流程。
@@ -392,6 +485,7 @@ def run_agent(
         start_time: 预约开始时间（如 "8:00"），None 则读 config
         end_time:   预约结束时间（如 "22:00"），None 则读 config
         max_steps:  最大循环步数（安全上限，防止无限循环）
+        should_cancel: 外部停止检查函数，返回 True 时中断任务
 
     Returns:
         bool: 是否成功完成预约
@@ -438,6 +532,7 @@ def run_agent(
     image_msg_indices: list[int] = []
 
     for step in range(1, max_steps + 1):
+        _check_cancel(should_cancel)
         logger.info(f"\n[Agent] ══ Step {step}/{max_steps} ══")
 
         # ---- 截图 ----
@@ -481,6 +576,7 @@ def run_agent(
         image_msg_indices.append(len(messages) - 1)
 
         # ---- 调用 AI ----
+        _check_cancel(should_cancel)
         try:
             response = client.chat.completions.create(
                 model=config.MODEL_NAME,
@@ -493,6 +589,8 @@ def run_agent(
         except Exception:
             logger.exception("[Agent] API 调用失败")
             return False
+
+        _check_cancel(should_cancel)
 
         ai_message = response.choices[0].message
 
@@ -516,11 +614,14 @@ def run_agent(
         tool_call = ai_message.tool_calls[0]
         tool_name = tool_call.function.name
 
+        raw_tool_args = tool_call.function.arguments
         try:
-            tool_args = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError as parse_err:
+            if not isinstance(raw_tool_args, str):
+                raise TypeError(f"arguments 类型非法: {type(raw_tool_args).__name__}")
+            tool_args = json.loads(raw_tool_args)
+        except Exception as parse_err:
             # JSON 格式损坏（如坐标分行、缺少键名等），不执行工具，反馈给 AI 让它重试
-            bad_raw = tool_call.function.arguments
+            bad_raw = str(raw_tool_args)
             logger.error(f"[Agent] ⚠️ 工具参数 JSON 解析失败，跳过本次调用并要求重试")
             logger.error(f"[Agent]    原始内容: {bad_raw}")
             logger.error(f"[Agent]    错误详情: {parse_err}")
@@ -532,6 +633,16 @@ def run_agent(
                     f"参数格式错误，无法解析（原始: {bad_raw[:120]}）。"
                     "请重新生成工具调用，确保 JSON 格式正确、x 和 y 参数均为整数且在同一行。"
                 ),
+            })
+            continue
+
+        if not isinstance(tool_args, dict):
+            logger.error(f"[Agent] ⚠️ 工具参数类型错误: {type(tool_args).__name__}")
+            messages.append(ai_message)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": "参数格式错误：工具参数必须是 JSON 对象。请按工具 schema 重新生成参数。",
             })
             continue
 
@@ -549,7 +660,26 @@ def run_agent(
             raise BookingError(reason)
 
         # ---- 执行工具 ----
-        result_str, new_img = _execute_tool(tool_name, tool_args, hwnd, dry_run, img)
+        try:
+            result_str, new_img = _execute_tool(
+                tool_name,
+                tool_args,
+                hwnd,
+                dry_run,
+                img,
+                should_cancel=should_cancel,
+            )
+        except InterruptedError:
+            raise
+        except Exception as tool_err:
+            logger.exception(f"[Agent] ⚠️ 工具执行异常: {tool_name}")
+            result_str = (
+                "工具执行失败："
+                f"{type(tool_err).__name__}: {tool_err}。"
+                "请根据当前截图重新判断并重试；"
+                "如为坐标问题，请提供合法 x/y（0-1000 数字）。"
+            )
+            new_img = None
 
         # 将本轮 AI 决策和工具结果加入对话历史
         messages.append(ai_message)

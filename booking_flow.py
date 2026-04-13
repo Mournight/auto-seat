@@ -7,6 +7,7 @@
 保留 BookingError 和 run_booking 签名以兼容 main.py 的现有调用。
 """
 import logging
+from typing import Callable
 import agent  # 导入智能 Agent 模块
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ def run_booking(
     dry_run: bool = False,
     start_time: str | None = None,
     end_time: str | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> bool:
     """
     执行完整的自习室预约流程（委托给 agent.run_agent）。
@@ -30,6 +32,7 @@ def run_booking(
         dry_run:    测试模式（True 时不点击最末「确定」按钮）
         start_time: 预约开始时间字符串（如 "8:00"），None 则读 config
         end_time:   预约结束时间字符串（如 "22:00"），None 则读 config
+        should_cancel: 外部停止检查函数，返回 True 时中断任务
 
     Returns:
         bool: 是否成功完成预约
@@ -40,4 +43,5 @@ def run_booking(
         dry_run=dry_run,
         start_time=start_time,
         end_time=end_time,
+        should_cancel=should_cancel,
     )
