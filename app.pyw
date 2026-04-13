@@ -133,8 +133,8 @@ class BookingApp(tk.Tk):
         info_frame.pack(fill=tk.X, pady=(4, 4))
 
         ttk.Label(info_frame, text=f"模型: {config.MODEL_NAME}").grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(info_frame, text=f"座位: {' -> '.join(config.PREFERRED_SEATS)}").grid(
-            row=0, column=1, sticky=tk.W, padx=20)
+        self.lbl_seat_config = ttk.Label(info_frame, text=f"座位: {config.get_seat_display_text()}")
+        self.lbl_seat_config.grid(row=0, column=1, sticky=tk.W, padx=20)
 
         thinking_text = "思考模式: ✅ 开启" if config.AGENT_ENABLE_THINKING else "思考模式: ⚡ 关闭(快速)"
         ttk.Label(info_frame, text=thinking_text, foreground="#2a7a2a" if config.AGENT_ENABLE_THINKING else "#888").grid(
@@ -146,7 +146,10 @@ class BookingApp(tk.Tk):
             row=1, column=1, sticky=tk.W, padx=20, pady=4)
 
         # ---- 醒目警告提示 ----
-        warning_msg = "⚠️ 重要提示：在 AI 运行期间，请务必保持待操作目标窗口处于前台，不要将其最小化，且尽量不要人为操作鼠标，以免干扰 AI 识别和点击。"
+        warning_msg = (
+            "⚠️ 重要提示：请先将目标窗口尽量放大（窗口越大，识别通常越稳定）；"
+            "运行期间务必保持目标窗口在前台、不要最小化，并尽量不要人为操作鼠标。"
+        )
         self.lbl_warning = tk.Label(
             frame, text=warning_msg, wraplength=550,
             foreground="red", font=("Microsoft YaHei", 9, "bold"),
@@ -169,6 +172,12 @@ class BookingApp(tk.Tk):
             command=self.start_window_selection
         )
         self.btn_select.pack(side=tk.RIGHT)
+
+        ttk.Label(
+            win_frame,
+            text="建议：锁定前先把目标窗口尽量放大，可明显提升识别准确率",
+            foreground="#b05a00"
+        ).pack(side=tk.BOTTOM, anchor=tk.W, pady=(6, 0))
 
         # 预约时间配置区
         time_frame = ttk.LabelFrame(frame, text="预约参数设置", padding=8)
@@ -199,12 +208,61 @@ class BookingApp(tk.Tk):
         
         ttk.Label(time_inner, text="(如 08:00 到 22:00)", foreground="gray").pack(side=tk.LEFT, padx=10)
 
-        # 第三行：保存默认值
+        # 第三行：座位策略二选一
+        ttk.Label(time_frame, text="3. 目标座位策略:").grid(row=2, column=0, sticky=tk.W, pady=4)
+
+        seat_mode_frame = ttk.Frame(time_frame)
+        seat_mode_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W)
+
+        init_mode = config.SEAT_MODE if config.SEAT_MODE in ("list", "range") else "list"
+        self.seat_mode_var = tk.StringVar(value=init_mode)
+        self.rb_seat_mode_list = ttk.Radiobutton(
+            seat_mode_frame,
+            text="具体座位（优先级列表）",
+            value="list",
+            variable=self.seat_mode_var,
+            command=self._on_seat_mode_change,
+        )
+        self.rb_seat_mode_list.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.rb_seat_mode_range = ttk.Radiobutton(
+            seat_mode_frame,
+            text="连续座位段（起止范围）",
+            value="range",
+            variable=self.seat_mode_var,
+            command=self._on_seat_mode_change,
+        )
+        self.rb_seat_mode_range.pack(side=tk.LEFT)
+
+        # 第四行：具体座位列表
+        ttk.Label(time_frame, text="4. 具体座位:").grid(row=3, column=0, sticky=tk.W, pady=4)
+        self.ent_seat_list = ttk.Entry(time_frame, width=40)
+        self.ent_seat_list.insert(0, ",".join(config.PREFERRED_SEATS))
+        self.ent_seat_list.grid(row=3, column=1, sticky=tk.W, padx=4)
+        ttk.Label(time_frame, text="逗号分隔，如 120,121,122", foreground="gray").grid(row=3, column=2, sticky=tk.W)
+
+        # 第五行：连续座位段
+        ttk.Label(time_frame, text="5. 座位段:").grid(row=4, column=0, sticky=tk.W, pady=4)
+        seat_range_frame = ttk.Frame(time_frame)
+        seat_range_frame.grid(row=4, column=1, columnspan=2, sticky=tk.W)
+
+        self.ent_seat_range_start = ttk.Entry(seat_range_frame, width=8)
+        self.ent_seat_range_start.insert(0, config.SEAT_RANGE_START)
+        self.ent_seat_range_start.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(seat_range_frame, text="到").pack(side=tk.LEFT)
+        self.ent_seat_range_end = ttk.Entry(seat_range_frame, width=8)
+        self.ent_seat_range_end.insert(0, config.SEAT_RANGE_END)
+        self.ent_seat_range_end.pack(side=tk.LEFT, padx=4)
+        ttk.Label(seat_range_frame, text="例如 120 到 150", foreground="gray").pack(side=tk.LEFT, padx=8)
+
+        self._on_seat_mode_change()
+
+        # 第六行：保存默认值
         self.btn_save_config = ttk.Button(
             time_frame, text="💾 保存并设置为默认",
             command=self._save_config_to_env
         )
-        self.btn_save_config.grid(row=2, column=1, columnspan=2, sticky=tk.E, pady=(4, 0))
+        self.btn_save_config.grid(row=5, column=1, columnspan=2, sticky=tk.E, pady=(6, 0))
 
         # 操作区
         act_frame = ttk.LabelFrame(frame, text="操作", padding=8)
@@ -243,7 +301,9 @@ class BookingApp(tk.Tk):
         hint = (
             "在下方编辑 AI 的系统提示词（System Prompt）。\n"
             "提示词中可使用以下占位符，运行时会自动替换：\n"
-            "  {seat1}   → 优先座位编号        {seat2}   → 备选座位编号\n"
+            "  {seat1}/{seat2} → 前两个目标座位（兼容旧模板）\n"
+            "  {seat_targets}  → 完整目标座位列表/座位段展开列表\n"
+            "  {seat_mode_desc} → 当前座位策略说明（列表或座位段）\n"
             "  {start_time} → 预约开始时间     {end_time} → 预约结束时间\n"
             "• 不同学校/楼栋的座位图布局不同，请根据实际情况修改步骤描述。\n"
             "• 保存后下次点击「预约」时立刻生效，无需重启程序。"
@@ -356,6 +416,9 @@ class BookingApp(tk.Tk):
             self.btn_select.config(state=tk.NORMAL)
             logger.info(f"成功锁定窗口: {title_disp} ({w}x{h}) HWND={root_hwnd}")
 
+            if w < 900 or h < 700:
+                logger.warning("⚠️ 目标窗口尺寸偏小，建议尽量放大窗口以提高识别准确率。")
+
             if w > 1920 and h <= 50:
                 logger.warning("⚠️ 警告：您选中的窗口极宽且极矮，可能是 Windows 任务栏！")
                 messagebox.showwarning("选中错误的窗口？",
@@ -364,11 +427,50 @@ class BookingApp(tk.Tk):
         else:
             self.after(50, self._wait_mouse_click)
 
+    def _parse_seat_list_input(self, text: str) -> list[str]:
+        """解析具体座位输入，支持中英文逗号和空格分隔，并去重保序。"""
+        normalized = text.replace("，", ",").replace("、", ",").replace(" ", ",")
+        parts = [x.strip() for x in normalized.split(",") if x.strip()]
+        uniq: list[str] = []
+        seen: set[str] = set()
+        for p in parts:
+            if p not in seen:
+                uniq.append(p)
+                seen.add(p)
+        return uniq
+
+    def _build_seat_display_text(self, mode: str, seats: list[str], range_start: str, range_end: str) -> str:
+        """构建顶部“当前配置”中的座位摘要文案。"""
+        if mode == "range":
+            if range_start and range_end:
+                return f"座位段: {range_start}-{range_end}"
+            return "座位段: 未完整配置"
+        if not seats:
+            return "座位列表: 未配置"
+        return f"座位列表: {' -> '.join(seats)}"
+
+    def _on_seat_mode_change(self):
+        """切换座位策略时，仅启用当前模式对应的输入框。"""
+        mode = self.seat_mode_var.get() if hasattr(self, "seat_mode_var") else "list"
+        if mode == "range":
+            self.ent_seat_list.config(state=tk.DISABLED)
+            self.ent_seat_range_start.config(state=tk.NORMAL)
+            self.ent_seat_range_end.config(state=tk.NORMAL)
+        else:
+            self.ent_seat_list.config(state=tk.NORMAL)
+            self.ent_seat_range_start.config(state=tk.DISABLED)
+            self.ent_seat_range_end.config(state=tk.DISABLED)
+
     def _save_config_to_env(self):
         """将当前输入的配置保存到本地 .env 文件"""
         trigger_v = self.ent_trigger.get().strip()
         start_v = self.ent_start.get().strip()
         end_v = self.ent_end.get().strip()
+        mode = self.seat_mode_var.get().strip().lower() if hasattr(self, "seat_mode_var") else "list"
+
+        if mode not in ("list", "range"):
+            messagebox.showwarning("提示", "座位策略无效，请在“具体座位”和“座位段”中二选一。")
+            return
 
         if not all([trigger_v, start_v, end_v]):
             messagebox.showwarning("提示", "所有参数均不能为空！")
@@ -378,6 +480,41 @@ class BookingApp(tk.Tk):
         if ":" not in trigger_v or ":" not in start_v or ":" not in end_v:
             messagebox.showwarning("格式错误", "时间格式应为 HH:MM (如 06:00)")
             return
+
+        list_backup = self._parse_seat_list_input(self.ent_seat_list.get().strip())
+        seat_list_value = ",".join(list_backup) if list_backup else ""
+        range_start_v = self.ent_seat_range_start.get().strip()
+        range_end_v = self.ent_seat_range_end.get().strip()
+
+        if mode == "list":
+            seats = self._parse_seat_list_input(self.ent_seat_list.get().strip())
+            if not seats:
+                messagebox.showwarning("座位配置错误", "请至少填写一个具体座位（支持逗号分隔多个）。")
+                return
+            seat_list_value = ",".join(seats)
+            seat_display = self._build_seat_display_text("list", seats, "", "")
+        else:
+            if not (range_start_v.isdigit() and range_end_v.isdigit()):
+                messagebox.showwarning("座位配置错误", "座位段必须是数字，如 120 到 150。")
+                return
+
+            start_num = int(range_start_v)
+            end_num = int(range_end_v)
+            if start_num > end_num:
+                messagebox.showwarning("座位配置错误", "座位段起始值不能大于结束值。")
+                return
+
+            span = end_num - start_num + 1
+            if span > config.MAX_SEAT_RANGE_SPAN:
+                messagebox.showwarning(
+                    "座位配置错误",
+                    f"座位段过长（{span} 个），请控制在 {config.MAX_SEAT_RANGE_SPAN} 个以内。"
+                )
+                return
+
+            range_start_v = str(start_num)
+            range_end_v = str(end_num)
+            seat_display = self._build_seat_display_text("range", [], range_start_v, range_end_v)
 
         env_path = ".env"
         if not os.path.exists(env_path):
@@ -390,7 +527,11 @@ class BookingApp(tk.Tk):
             keys = {
                 "TRIGGER_TIME": trigger_v,
                 "BOOKING_START_TIME": start_v,
-                "BOOKING_END_TIME": end_v
+                "BOOKING_END_TIME": end_v,
+                "SEAT_MODE": mode,
+                "PREFERRED_SEATS": seat_list_value,
+                "SEAT_RANGE_START": range_start_v,
+                "SEAT_RANGE_END": range_end_v,
             }
             
             new_lines = []
@@ -411,8 +552,23 @@ class BookingApp(tk.Tk):
             with open(env_path, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
 
-            logger.info("配置已保存到 .env 文件")
-            messagebox.showinfo("保存成功", "✅ 配置已永久保存！\n下次启动将默认使用。")
+            # 更新运行时配置，避免用户保存后顶部“当前配置”不刷新
+            config.TRIGGER_TIME = trigger_v
+            config.BOOKING_START_TIME = start_v
+            config.BOOKING_END_TIME = end_v
+            config.SEAT_MODE = mode
+            if list_backup:
+                config.PREFERRED_SEATS = list_backup
+            if mode == "list":
+                config.PREFERRED_SEATS = self._parse_seat_list_input(seat_list_value)
+            config.SEAT_RANGE_START = range_start_v
+            config.SEAT_RANGE_END = range_end_v
+
+            if hasattr(self, "lbl_seat_config"):
+                self.lbl_seat_config.config(text=f"座位: {seat_display}")
+
+            logger.info(f"配置已保存到 .env 文件（座位策略：{seat_display}）")
+            messagebox.showinfo("保存成功", f"✅ 配置已永久保存！\n当前座位策略：{seat_display}\n下次启动将默认使用。")
         except Exception as e:
             logger.error(f"保存失败: {e}")
             messagebox.showerror("保存失败", f"❌ 无法写入文件：\n{e}")
@@ -427,8 +583,21 @@ class BookingApp(tk.Tk):
         self.ent_trigger.config(state=state)
         self.ent_start.config(state=state)
         self.ent_end.config(state=state)
+        if hasattr(self, 'rb_seat_mode_list'):
+            self.rb_seat_mode_list.config(state=state)
+        if hasattr(self, 'rb_seat_mode_range'):
+            self.rb_seat_mode_range.config(state=state)
+        if hasattr(self, 'ent_seat_list'):
+            self.ent_seat_list.config(state=state)
+        if hasattr(self, 'ent_seat_range_start'):
+            self.ent_seat_range_start.config(state=state)
+        if hasattr(self, 'ent_seat_range_end'):
+            self.ent_seat_range_end.config(state=state)
         if hasattr(self, 'btn_save_config'):
             self.btn_save_config.config(state=state)
+
+        if state == tk.NORMAL and hasattr(self, 'seat_mode_var'):
+            self._on_seat_mode_change()
         
         # 停止按钮的状态与常规按钮相反
         if state == tk.DISABLED:

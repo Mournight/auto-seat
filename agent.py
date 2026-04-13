@@ -29,13 +29,14 @@ logger = logging.getLogger(__name__)
 # 提示词模板与持久化
 # ============================================================
 
-# 模板中保留四个运行时占位符：{seat1} {seat2} {start_time} {end_time}
+# 模板中保留运行时占位符：
+# {seat1} {seat2} {seat_targets} {seat_mode_desc} {start_time} {end_time}
 # 其余花括号（如 JSON 示例）需写成 {{ }}
 DEFAULT_SYSTEM_PROMPT = """\
 你是一个专门操作「学生自习室预约小程序」的界面自动化 Agent。
 
 # 你的任务
-预约指定座位（**优先 {seat1}，备选 {seat2}**），时间段：**{start_time} ~ {end_time}**。
+预约目标座位（**{seat_mode_desc}**）：**{seat_targets}**，时间段：**{start_time} ~ {end_time}**。
 
 # 这个微信小程序的完整预约步骤（请严格按此顺序執行）
 1. 首页底部导航栏有「预约选座」Tab → 点击它进入预约页
@@ -468,6 +469,24 @@ def _execute_tool(
 MAX_HISTORY_IMAGES = 3
 
 
+def _build_seat_targets_for_prompt(seats: list[str], max_show: int = 80) -> str:
+    """构建用于提示词的座位目标字符串，避免过长占用过多 token。"""
+    if not seats:
+        return "未配置"
+    if len(seats) <= max_show:
+        return " -> ".join(seats)
+    return f"{' -> '.join(seats[:max_show])} -> ... -> {seats[-1]}（共{len(seats)}个）"
+
+
+def _build_seat_targets_for_log(seats: list[str], max_show: int = 20) -> str:
+    """构建用于日志输出的简短座位摘要。"""
+    if not seats:
+        return "未配置"
+    if len(seats) <= max_show:
+        return " -> ".join(seats)
+    return f"{' -> '.join(seats[:max_show])} -> ...（共{len(seats)}个）"
+
+
 def run_agent(
     hwnd: int,
     dry_run: bool = False,
@@ -492,14 +511,33 @@ def run_agent(
     """
     _start = start_time or config.BOOKING_START_TIME
     _end   = end_time   or config.BOOKING_END_TIME
-    seat1  = config.PREFERRED_SEATS[0]
-    seat2  = config.PREFERRED_SEATS[1] if len(config.PREFERRED_SEATS) > 1 else "无"
+
+    target_seats = config.get_target_seats() if hasattr(config, "get_target_seats") else list(config.PREFERRED_SEATS)
+    if not target_seats:
+        raise BookingError("未配置有效目标座位，请先在界面里保存具体座位或座位段。")
+
+    seat1 = target_seats[0]
+    seat2 = target_seats[1] if len(target_seats) > 1 else "无"
+    seat_targets = _build_seat_targets_for_prompt(target_seats)
+
+    seat_mode = getattr(config, "SEAT_MODE", "list")
+    if seat_mode == "range":
+        range_start = getattr(config, "SEAT_RANGE_START", "")
+        range_end = getattr(config, "SEAT_RANGE_END", "")
+        if range_start and range_end:
+            seat_mode_desc = f"连续座位段（{range_start}-{range_end}）"
+        else:
+            seat_mode_desc = "连续座位段"
+    else:
+        seat_mode_desc = "具体座位优先级列表"
 
     # ---- 加载提示词（每次运行时实时读取，保证 GUI 修改立刻生效）----
     raw_prompt = load_prompt()
     try:
         system_prompt = raw_prompt.format(
             seat1=seat1, seat2=seat2,
+            seat_targets=seat_targets,
+            seat_mode_desc=seat_mode_desc,
             start_time=_start, end_time=_end,
         )
     except KeyError as e:
@@ -523,7 +561,7 @@ def run_agent(
 
     logger.info("=" * 55)
     logger.info(f"[Agent] 启动 AI 自动预约（{'DRY_RUN 测试' if dry_run else '正式执行'}）")
-    logger.info(f"[Agent] 目标座位: {seat1} / {seat2}")
+    logger.info(f"[Agent] 目标座位: {_build_seat_targets_for_log(target_seats)}")
     logger.info(f"[Agent] 预约时间: {_start} ~ {_end}")
     logger.info(f"[Agent] 最大步数: {max_steps}，历史图片保留: {MAX_HISTORY_IMAGES}")
     logger.info("=" * 55)
