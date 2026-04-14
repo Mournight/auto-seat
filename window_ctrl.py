@@ -18,6 +18,60 @@ import io
 PW_RENDERFULLCONTENT = 0x00000002  # PrintWindow 渲染完整内容（包括 WebView）
 
 
+def is_window_handle_valid(hwnd: int) -> bool:
+    """判断 HWND 是否仍然有效。"""
+    if not hwnd:
+        return False
+    try:
+        return bool(win32gui.IsWindow(hwnd))
+    except Exception:
+        return False
+
+
+def get_window_title(hwnd: int) -> str:
+    """安全获取窗口标题；句柄无效时返回空字符串。"""
+    if not is_window_handle_valid(hwnd):
+        return ""
+    try:
+        return win32gui.GetWindowText(hwnd).strip()
+    except Exception:
+        return ""
+
+
+def find_window_by_title(title: str) -> int | None:
+    """按标题查找顶层可见窗口，返回面积最大的一个句柄。"""
+    target = (title or "").strip()
+    if not target:
+        return None
+
+    candidates: list[tuple[int, int]] = []
+
+    def _enum(hwnd, _):
+        if not win32gui.IsWindow(hwnd):
+            return
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+        if win32gui.GetWindowText(hwnd).strip() != target:
+            return
+        try:
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            area = max(0, right - left) * max(0, bottom - top)
+        except Exception:
+            area = 0
+        candidates.append((area, hwnd))
+
+    try:
+        win32gui.EnumWindows(_enum, None)
+    except Exception:
+        return None
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
 def pick_window_by_click(prompt: str = "请在 3 秒内单击要控制的窗口...") -> int:
     """
     弹出提示，等待用户鼠标点击，返回被点击位置的顶层窗口 HWND。

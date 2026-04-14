@@ -39,6 +39,7 @@ DEFAULT_SYSTEM_PROMPT = """\
 预约目标座位（**{seat_mode_desc}**）：**{seat_targets}**，时间段：**{start_time} ~ {end_time}**。
 
 # 这个微信小程序的完整预约步骤（请严格按此顺序執行）
+0. **先刷新小程序**：点击右上角「...」按钮，在弹出菜单中点击「重新进入小程序 / 重试 / 刷新（圆形箭头）」按钮，然后 wait_and_capture 等待刷新完成
 1. 首页底部导航栏有「预约选座」Tab → 点击它进入预约页
 2. 确认处于「5号楼」Tab（若不在，先点击「5号楼」Tab）→ 点击「5号楼智能自习室」右侧蓝色「选座」按钮
 3. 进入座位图（绿色格子=可用，红色=已占）→ 找到目标座位编号并点击
@@ -74,6 +75,7 @@ DEFAULT_SYSTEM_PROMPT = """\
 - **成功**：完成步骤8（点击确定）后調用 task_complete。
 - **失败**：目标座位全部被占（无绿色可用）、目标时间段不在列表中、超过5次重复失败，调用 task_failed 并说明原因。
 """
+
 
 # system_prompt.txt 存储路径（与代码同目录）
 PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system_prompt.txt")
@@ -566,6 +568,48 @@ def run_agent(
     logger.info(f"[Agent] 最大步数: {max_steps}，历史图片保留: {MAX_HISTORY_IMAGES}")
     logger.info("=" * 55)
 
+    current_hwnd = hwnd
+    last_window_title = window_ctrl.get_window_title(current_hwnd)
+
+    def _is_invalid_hwnd_error(err: Exception) -> bool:
+        text = str(err)
+        low = text.lower()
+        return (
+            "无效的窗口句柄" in text
+            or "invalid window handle" in low
+            or ("1400" in text and "window" in low)
+        )
+
+    def _ensure_hwnd_available() -> bool:
+        nonlocal current_hwnd, last_window_title
+
+        if window_ctrl.is_window_handle_valid(current_hwnd):
+            title_now = window_ctrl.get_window_title(current_hwnd)
+            if title_now:
+                last_window_title = title_now
+            return True
+
+        logger.warning(
+            f"[Agent] ⚠️ 检测到窗口句柄失效: {current_hwnd}。"
+            f"3 秒后按标题恢复（标题: {last_window_title or '未知'}）"
+        )
+        _sleep_interruptible(3.0, should_cancel)
+        _check_cancel(should_cancel)
+
+        if not last_window_title:
+            logger.error("[Agent] ❌ 无法恢复窗口句柄：缺少历史窗口标题")
+            return False
+
+        recovered = window_ctrl.find_window_by_title(last_window_title)
+        if recovered is None:
+            logger.error(f"[Agent] ❌ 未找到标题为「{last_window_title}」的窗口，无法继续")
+            return False
+
+        old_hwnd = current_hwnd
+        current_hwnd = recovered
+        logger.info(f"[Agent] ✅ 句柄恢复成功: {old_hwnd} -> {current_hwnd}")
+        return True
+
     # 记录哪些 messages 下标包含图片（用于滑动清理）
     image_msg_indices: list[int] = []
 
@@ -574,11 +618,24 @@ def run_agent(
         logger.info(f"\n[Agent] ══ Step {step}/{max_steps} ══")
 
         # ---- 截图 ----
-        try:
-            img = window_ctrl.capture_window(hwnd)
-        except Exception as e:
-            logger.error(f"[Agent] 截图失败: {e}")
+        if not _ensure_hwnd_available():
             return False
+
+        try:
+            img = window_ctrl.capture_window(current_hwnd)
+        except Exception as e:
+            if _is_invalid_hwnd_error(e):
+                logger.warning("[Agent] 截图时句柄失效，执行 3 秒等待 + 同标题窗口恢复")
+                if not _ensure_hwnd_available():
+                    return False
+                try:
+                    img = window_ctrl.capture_window(current_hwnd)
+                except Exception as e2:
+                    logger.error(f"[Agent] 句柄恢复后截图仍失败: {e2}")
+                    return False
+            else:
+                logger.error(f"[Agent] 截图失败: {e}")
+                return False
         _save_screenshot(img, f"step{step:02d}")
 
         # ---- 历史图片滑动窗口清理 ----
@@ -698,11 +755,14 @@ def run_agent(
             raise BookingError(reason)
 
         # ---- 执行工具 ----
+        if not _ensure_hwnd_available():
+            return False
+
         try:
             result_str, new_img = _execute_tool(
                 tool_name,
                 tool_args,
-                hwnd,
+                current_hwnd,
                 dry_run,
                 img,
                 should_cancel=should_cancel,
@@ -710,14 +770,41 @@ def run_agent(
         except InterruptedError:
             raise
         except Exception as tool_err:
-            logger.exception(f"[Agent] ⚠️ 工具执行异常: {tool_name}")
-            result_str = (
-                "工具执行失败："
-                f"{type(tool_err).__name__}: {tool_err}。"
-                "请根据当前截图重新判断并重试；"
-                "如为坐标问题，请提供合法 x/y（0-1000 数字）。"
-            )
-            new_img = None
+            if _is_invalid_hwnd_error(tool_err):
+                logger.warning(f"[Agent] 工具执行时句柄失效（{tool_name}），尝试恢复后重试一次")
+                if _ensure_hwnd_available():
+                    try:
+                        result_str, new_img = _execute_tool(
+                            tool_name,
+                            tool_args,
+                            current_hwnd,
+                            dry_run,
+                            img,
+                            should_cancel=should_cancel,
+                        )
+                        logger.info(f"[Agent] 工具重试成功: {tool_name}")
+                    except InterruptedError:
+                        raise
+                    except Exception as retry_err:
+                        logger.exception(f"[Agent] ⚠️ 工具重试后仍失败: {tool_name}")
+                        result_str = (
+                            "工具执行失败："
+                            f"{type(retry_err).__name__}: {retry_err}。"
+                            "请根据当前截图重新判断并重试；"
+                            "如为坐标问题，请提供合法 x/y（0-1000 数字）。"
+                        )
+                        new_img = None
+                else:
+                    return False
+            else:
+                logger.exception(f"[Agent] ⚠️ 工具执行异常: {tool_name}")
+                result_str = (
+                    "工具执行失败："
+                    f"{type(tool_err).__name__}: {tool_err}。"
+                    "请根据当前截图重新判断并重试；"
+                    "如为坐标问题，请提供合法 x/y（0-1000 数字）。"
+                )
+                new_img = None
 
         # 将本轮 AI 决策和工具结果加入对话历史
         messages.append(ai_message)
