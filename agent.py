@@ -25,6 +25,14 @@ import window_ctrl
 
 logger = logging.getLogger(__name__)
 
+# 单次滚动限幅：避免一次滚动过多导致时间选项越过目标。
+SCROLL_MAX_CLICKS_GENERAL = 8
+SCROLL_MAX_CLICKS_TIME_DROPDOWN = 4
+SCROLL_REASON_TIME_KEYWORDS = (
+    "时间", "开始时间", "结束时间", "下拉", "列表", "选时", "选时段",
+    "time", "dropdown", "picker", "clock",
+)
+
 # ============================================================
 # 提示词模板与持久化
 # ============================================================
@@ -146,8 +154,8 @@ TOOLS = [
                     },
                     "clicks": {
                         "type": "integer",
-                        "description": "滚动格数（建议 5-15），默认 10",
-                        "default": 10,
+                        "description": "滚动格数（建议 1-6；时间下拉列表建议 1-3），默认 3",
+                        "default": 3,
                     },
                     "reason": {"type": "string", "description": "滚动原因"},
                 },
@@ -329,6 +337,12 @@ def _parse_click_coord(value: object, field_name: str) -> int:
     return int(round(num))
 
 
+def _is_time_dropdown_scroll_reason(reason: str) -> bool:
+    """根据滚动原因文本判断是否处于时间下拉列表场景。"""
+    text = (reason or "").lower()
+    return any(k in text for k in SCROLL_REASON_TIME_KEYWORDS)
+
+
 def _execute_tool(
     tool_name: str,
     args: dict,
@@ -382,23 +396,37 @@ def _execute_tool(
             return "错误：scroll.direction 必须是 up 或 down。", None
 
         try:
-            clicks = int(float(args.get("clicks", 10)))
+            clicks = int(float(args.get("clicks", 3)))
         except Exception:
             logger.error(f"[Agent] ⚠️ scroll 参数非法 clicks={args.get('clicks')}")
             return "错误：scroll.clicks 必须是数字。", None
 
-        if clicks <= 0 or clicks > 30:
-            logger.error(f"[Agent] ⚠️ scroll.clicks 超出允许范围: {clicks}")
-            return "错误：scroll.clicks 必须在 1-30 之间。", None
-
         reason = args.get("reason", "")
+        if clicks <= 0:
+            logger.error(f"[Agent] ⚠️ scroll.clicks 非法（需 > 0）: {clicks}")
+            return "错误：scroll.clicks 必须大于 0。", None
+
+        requested_clicks = clicks
+        max_clicks_allowed = (
+            SCROLL_MAX_CLICKS_TIME_DROPDOWN
+            if _is_time_dropdown_scroll_reason(reason)
+            else SCROLL_MAX_CLICKS_GENERAL
+        )
+        if clicks > max_clicks_allowed:
+            logger.warning(
+                f"[Agent] ⚠️ scroll.clicks 过大，已限幅 {requested_clicks} -> {max_clicks_allowed}"
+                f"（reason={reason}）"
+            )
+            clicks = max_clicks_allowed
+
         logger.info(f"[Agent] 🔄 滚动 {direction} {clicks} 格  原因：{reason}")
         window_ctrl.scroll_window(hwnd, clicks=clicks, direction=direction)
         _sleep_interruptible(1.2, should_cancel)  # 等待 WebView 重绘
         _check_cancel(should_cancel)
         new_img = window_ctrl.capture_window(hwnd)
         _save_screenshot(new_img, f"scroll_{direction}")
-        return f"已向 {direction} 滚动 {clicks} 格，已更新截图", new_img
+        suffix = "（已自动限幅）" if requested_clicks != clicks else ""
+        return f"已向 {direction} 滚动 {clicks} 格{suffix}，已更新截图", new_img
 
     elif tool_name == "wait_and_capture":
         try:
