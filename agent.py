@@ -2,10 +2,12 @@
 智能 Agent 模块 - 用「感知-推理-行动」循环替代硬编码步骤。
 
 核心流程：
-  截图 → AI 判断当前界面状态 → AI 选择工具（click/scroll/wait）→ 执行 → 再截图 → ...
+    截图 → AI 判断当前界面状态 → AI 选择工具（click/scroll/wait）→ 执行 → 再截图 → ...
 
-提示词（System Prompt）从 system_prompt.txt 文件加载，
-不存在时退回到内置默认值。GUI 中保存后立刻对下次运行生效。
+提示词读取优先级：
+    1) 用户自定义文件 user_system_promote.txt（用户在 GUI 点击保存后生成）
+    2) 默认文件 default_system_prompt.txt（建议通过 Git 同步维护）
+    3) 不提供代码兜底，文件缺失时直接报错
 """
 import os
 import io
@@ -17,7 +19,7 @@ import base64
 import logging
 from datetime import datetime
 from typing import Callable
-from PIL import Image
+from PIL import Image, ImageChops
 from openai import OpenAI
 
 import config
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 # 单次滚动限幅：避免一次滚动过多导致时间选项越过目标。
 SCROLL_MAX_CLICKS_GENERAL = 8
 SCROLL_MAX_CLICKS_TIME_DROPDOWN = 4
+SCROLL_NO_CHANGE_RATIO_THRESHOLD = 0.003
 SCROLL_REASON_TIME_KEYWORDS = (
     "时间", "开始时间", "结束时间", "下拉", "列表", "选时", "选时段",
     "time", "dropdown", "picker", "clock",
@@ -37,78 +40,73 @@ SCROLL_REASON_TIME_KEYWORDS = (
 # 提示词模板与持久化
 # ============================================================
 
-# 模板中保留运行时占位符：
-# {seat1} {seat2} {seat_targets} {seat_mode_desc} {start_time} {end_time}
-# 其余花括号（如 JSON 示例）需写成 {{ }}
-DEFAULT_SYSTEM_PROMPT = """\
-你是一个专门操作「学生自习室预约小程序」的界面自动化 Agent。
-
-# 你的任务
-预约目标座位（**{seat_mode_desc}**）：**{seat_targets}**，时间段：**{start_time} ~ {end_time}**。
-
-# 这个微信小程序的完整预约步骤（请严格按此顺序執行）
-0. **先刷新小程序**：点击右上角「...」按钮，在弹出菜单中点击「重新进入小程序 / 重试 / 刷新（圆形箭头）」按钮，然后 wait_and_capture 等待刷新完成
-1. 首页底部导航栏有「预约选座」Tab → 点击它进入预约页
-2. 确认处于「5号楼」Tab（若不在，先点击「5号楼」Tab）→ 点击「5号楼智能自习室」右侧蓝色「选座」按钮
-3. 进入座位图（绿色格子=可用，红色=已占）→ 找到目标座位编号并点击
-4. 弹出预约确认弹窗 → 点击「开始时间」下拉框
-5. 在下拉列表中选择 {start_time}
-6. 回到弹窗 → 点击「结束时间」下拉框
-7. 在下拉列表中选择 {end_time}
-8. 点击右侧蓝色「确定」按钮 → 预约完成，调用 task_complete
-
-# 当前界面判断规则（每轮截图后必须先判断）
-- 看到底部有多个图标Tab、页面内容较稀疏 → **首页**，需找并点击「预约选座」Tab
-- 看到「4号楼」「5号楼」等楼层Tab + 自习室列表 → **预约选座页**
-- 看到大量小格子组成的座位分布图 → **座位图页面**
-- 看到含「开始时间」「结束时间」文字的弹窗界面 → **预约确认弹窗**
-- 看到竖排密集排列的时间选项（如 8:00、9:00 …） → **时间下拉列表**
-
-# 关键操作规则
-1. **座位必须二次验证**：点击座位后，调用 wait_and_capture 等待弹窗出现，然后检查弹窗背景中放大的座位编号。若编号不符，点击弹窗里的「取消」，记下错误编号，再继续找正确座位。
-2. **滚动查找座位**：当前截图中看不到目标座位时，根据可见编号判断目标在上方还是下方，使用 scroll 工具翻动。
-3. **禁止编造坐标**：坐标必须来自对当前截图的真实观察，使用 0-1000 归一化范围，即截图左上角为(0,0)，右下角为(1000,1000)。
-4. **界面变化后需截图确认**：点击或滚动后，用 wait_and_capture 等待界面响应，下一轮再做判断。
-5. **判断时间栏是否已选中（重要）**：
-   - 开始时间栏：只要显示的**不是灰色的「请选择开始时间」**，就说明已选定（无论显示的是"现在"、"8:00"还是任何其他时间文字），确定选择正确后，可以进行下一步，选定结束时间。
-   - 结束时间栏：只要显示的**不是灰色的「请选择结束时间」**，就说明已选定，确定选择正确后，可以进行下一步，点击「确定」按钮。
-   - 「现在」是合法的已选时间状态，代表系统将当前时刻作为开始时间，请接受并继续。
-6. **时间下拉框操作规范（防止反复失败）**：
-   - 点击「开始时间」或「结束时间」区域后，**必须立刻调用 wait_and_capture(1.5)**，确认下拉列表已展开（看到竖排多个时间选项），再去点击目标时间。
-   - 下拉列表是浮层，点击列表**外部任何区域**都会让它立刻关闭。点击时间选项时要**严格对准列表内文字行的中央**，不要点到边缘外侧。
-   - 若目标时间（如 22:00）不在列表可视范围内，用 scroll 工具向下滚动直到看到它，再点击。
-   - 若截图显示列表已消失（回到「请选择...」状态），说明误点了外部，冷静地重新点击时间栏打开即可。
-
-# 完成或失败条件
-- **成功**：完成步骤8（点击确定）后調用 task_complete。
-- **失败**：目标座位全部被占（无绿色可用）、目标时间段不在列表中、超过5次重复失败，调用 task_failed 并说明原因。
-"""
+# 注意：提示词不再在代码中硬编码。
+# default_system_prompt.txt 是唯一默认来源，缺失时将直接报错。
 
 
-# system_prompt.txt 存储路径（与代码同目录）
-PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system_prompt.txt")
+# 提示词文件路径（与代码同目录）
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 默认提示词来源（建议通过 Git 同步维护）
+DEFAULT_PROMPT_FILE = os.path.join(_BASE_DIR, "default_system_prompt.txt")
+
+# 用户手动保存后的提示词（存在时优先使用）
+USER_PROMPT_FILE = os.path.join(_BASE_DIR, "user_system_promote.txt")
+
+# 兼容旧代码中对 PROMPT_FILE 的引用（指向用户提示词文件）
+PROMPT_FILE = USER_PROMPT_FILE
+
+
+def _read_prompt_file(file_path: str) -> str | None:
+    """读取提示词文件，返回去首尾空白后的文本；读取失败或为空返回 None。"""
+    if not os.path.exists(file_path):
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        return content or None
+    except Exception as e:
+        logger.warning(f"读取提示词文件失败: {file_path}，错误: {e}")
+        return None
+
+
+def _build_missing_prompt_error(file_path: str, role: str) -> str:
+    """构建提示词文件缺失/无效时的统一报错文案。"""
+    filename = os.path.basename(file_path)
+    return (
+        f"{role}提示词文件不可用：{filename}。"
+        "请重新拉取 Git 仓库或重新下载完整项目后再试。"
+    )
+
+
+def load_default_prompt() -> str:
+    """加载默认提示词：仅允许从默认文件读取，失败时直接抛错。"""
+    content = _read_prompt_file(DEFAULT_PROMPT_FILE)
+    if content:
+        logger.info("已从 default_system_prompt.txt 加载默认提示词")
+        return content
+
+    msg = _build_missing_prompt_error(DEFAULT_PROMPT_FILE, "默认")
+    logger.error(msg)
+    raise FileNotFoundError(msg)
 
 
 def load_prompt() -> str:
-    """加载提示词，优先从文件读取，文件不存在或为空时使用内置默认值。"""
-    if os.path.exists(PROMPT_FILE):
-        try:
-            with open(PROMPT_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            if content:
-                logger.info("已从 system_prompt.txt 加载自定义提示词")
-                return content
-        except Exception as e:
-            logger.warning(f"读取提示词文件失败: {e}，使用内置默认提示词")
-    return DEFAULT_SYSTEM_PROMPT
+    """加载提示词：优先用户提示词；不存在则读取默认提示词；不可用时直接抛错。"""
+    user_content = _read_prompt_file(USER_PROMPT_FILE)
+    if user_content:
+        logger.info("已从 user_system_promote.txt 加载用户提示词")
+        return user_content
+
+    return load_default_prompt()
 
 
 def save_prompt(text: str) -> bool:
-    """将提示词保存到 system_prompt.txt。"""
+    """将提示词保存到 user_system_promote.txt（用户优先提示词文件）。"""
     try:
-        with open(PROMPT_FILE, "w", encoding="utf-8") as f:
+        with open(USER_PROMPT_FILE, "w", encoding="utf-8") as f:
             f.write(text)
-        logger.info("提示词已保存到 system_prompt.txt，下次运行立刻生效")
+        logger.info("提示词已保存到 user_system_promote.txt，后续将优先使用用户提示词")
         return True
     except Exception as e:
         logger.error(f"保存提示词失败: {e}")
@@ -343,6 +341,27 @@ def _is_time_dropdown_scroll_reason(reason: str) -> bool:
     return any(k in text for k in SCROLL_REASON_TIME_KEYWORDS)
 
 
+def _estimate_image_change_ratio(before_img: Image.Image, after_img: Image.Image) -> float:
+    """估算两张截图的像素变化比例（0~1），用于判断滚动是否生效。"""
+    if before_img.size != after_img.size:
+        return 1.0
+
+    try:
+        before_rgb = before_img.convert("RGB")
+        after_rgb = after_img.convert("RGB")
+        diff = ImageChops.difference(before_rgb, after_rgb).convert("L")
+        hist = diff.histogram()
+        total = sum(hist) if hist else 0
+        if total <= 0:
+            return 0.0
+        unchanged = hist[0]
+        changed_ratio = 1.0 - (unchanged / total)
+        return max(0.0, min(1.0, changed_ratio))
+    except Exception as e:
+        logger.warning(f"[Agent] 估算截图变化比例失败，按有变化处理: {e}")
+        return 1.0
+
+
 def _execute_tool(
     tool_name: str,
     args: dict,
@@ -350,6 +369,7 @@ def _execute_tool(
     dry_run: bool,
     current_img: Image.Image,
     should_cancel: Callable[[], bool] | None = None,
+    runtime_state: dict[str, object] | None = None,
 ) -> tuple[str, Image.Image | None]:
     """
     执行 AI 选择的工具。
@@ -425,8 +445,40 @@ def _execute_tool(
         _check_cancel(should_cancel)
         new_img = window_ctrl.capture_window(hwnd)
         _save_screenshot(new_img, f"scroll_{direction}")
+
+        change_ratio = _estimate_image_change_ratio(current_img, new_img)
+        no_change = change_ratio <= SCROLL_NO_CHANGE_RATIO_THRESHOLD
+
+        no_change_streak = 1 if no_change else 0
+        if runtime_state is not None:
+            last_dir = str(runtime_state.get("last_scroll_direction", ""))
+            streak_raw = runtime_state.get("scroll_no_change_streak", 0)
+            try:
+                prev_streak = int(streak_raw)
+            except Exception:
+                prev_streak = 0
+
+            if no_change:
+                no_change_streak = prev_streak + 1 if last_dir == direction else 1
+                runtime_state["scroll_no_change_streak"] = no_change_streak
+            else:
+                runtime_state["scroll_no_change_streak"] = 0
+
+            runtime_state["last_scroll_direction"] = direction
+
         suffix = "（已自动限幅）" if requested_clicks != clicks else ""
-        return f"已向 {direction} 滚动 {clicks} 格{suffix}，已更新截图", new_img
+        if no_change:
+            return (
+                f"已向 {direction} 滚动 {clicks} 格{suffix}，但页面几乎无变化"
+                f"（变化率 {change_ratio:.2%}，同方向连续无变化 {no_change_streak} 次），"
+                "疑似已到该方向边界。"
+                f"请停止继续向 {direction} 滚动；若目标编号应在反方向请改向查找；"
+                "若已覆盖边界仍找不到目标，请按优先级切换下一座位，全部失败则调用 task_failed。"
+            ), new_img
+
+        return (
+            f"已向 {direction} 滚动 {clicks} 格{suffix}，页面变化率 {change_ratio:.2%}，已更新截图"
+        ), new_img
 
     elif tool_name == "wait_and_capture":
         try:
@@ -522,8 +574,11 @@ def run_agent(
     dry_run: bool = False,
     start_time: str | None = None,
     end_time: str | None = None,
-    max_steps: int = 30,
+    max_steps: int = 50,
     should_cancel: Callable[[], bool] | None = None,
+    target_window_title: str | None = None,
+    target_window_class_name: str | None = None,
+    target_window_pid: int | None = None,
 ) -> bool:
     """
     启动 Agent 主循环，让 AI 自主完成预约全流程。
@@ -535,6 +590,9 @@ def run_agent(
         end_time:   预约结束时间（如 "22:00"），None 则读 config
         max_steps:  最大循环步数（安全上限，防止无限循环）
         should_cancel: 外部停止检查函数，返回 True 时中断任务
+        target_window_title: 目标窗口标题，用于句柄恢复
+        target_window_class_name: 目标窗口类名，用于句柄恢复
+        target_window_pid: 目标窗口 PID，用于句柄恢复
 
     Returns:
         bool: 是否成功完成预约
@@ -562,7 +620,10 @@ def run_agent(
         seat_mode_desc = "具体座位优先级列表"
 
     # ---- 加载提示词（每次运行时实时读取，保证 GUI 修改立刻生效）----
-    raw_prompt = load_prompt()
+    try:
+        raw_prompt = load_prompt()
+    except Exception as e:
+        raise BookingError(str(e))
     try:
         system_prompt = raw_prompt.format(
             seat1=seat1, seat2=seat2,
@@ -578,8 +639,8 @@ def run_agent(
     if dry_run:
         system_prompt += (
             "\n\n⚠️ **当前为测试（DRY_RUN）模式**，规则如下：\n"
-            "- **步骤1~7 全部真实执行**：点击「预约选座」Tab、点击「选座」按钮、"
-            "点击座位、选择开始时间、选择结束时间——全部照常调用 click 工具真实操作。\n"
+            "- **步骤1~7 全部真实执行**：先点右上角三个点并重新进入小程序，再点「预约选座」Tab、"
+            "点击「筛选」按钮、设置开始/结束时间、点击筛选弹窗的「确定」、点击座位——全部照常调用 click 工具真实操作。\n"
             "- **【!!!FORBIDDEN!!!】步骤8 绝对禁止点击**：当你定位到最终蓝色「确定」按钮后，"
             "**不要调用 click**，在测试状态下,极有可能导致用户操作违规!!!改为调用 task_complete即可"
             "在 message 中说明已识别到「确定」按钮的坐标但未提交，测试流程结束。"
@@ -597,7 +658,42 @@ def run_agent(
     logger.info("=" * 55)
 
     current_hwnd = hwnd
-    last_window_title = window_ctrl.get_window_title(current_hwnd)
+    last_window_title = (target_window_title or "").strip() or window_ctrl.get_window_title(current_hwnd)
+    last_window_class_name = (target_window_class_name or "").strip() or window_ctrl.get_window_class_name(current_hwnd)
+    last_window_pid = target_window_pid if target_window_pid is not None else window_ctrl.get_window_process_id(current_hwnd)
+
+    def _refresh_window_signature() -> None:
+        """在句柄仍有效时刷新窗口签名，提升后续重获句柄的准确率。"""
+        nonlocal last_window_title, last_window_class_name, last_window_pid
+
+        if not window_ctrl.is_window_handle_valid(current_hwnd):
+            return
+
+        title_now = window_ctrl.get_window_title(current_hwnd)
+        class_now = window_ctrl.get_window_class_name(current_hwnd)
+        pid_now = window_ctrl.get_window_process_id(current_hwnd)
+
+        if title_now:
+            last_window_title = title_now
+        if class_now:
+            last_window_class_name = class_now
+        if pid_now is not None:
+            last_window_pid = pid_now
+
+    def _recover_window_handle() -> int | None:
+        """按窗口签名恢复句柄；失败时回退到标题匹配。"""
+        recovered = window_ctrl.find_window_for_recovery(
+            last_window_title,
+            last_window_class_name,
+            last_window_pid,
+        )
+        if recovered is not None:
+            return recovered
+
+        if last_window_title:
+            return window_ctrl.find_window_by_title(last_window_title)
+
+        return None
 
     def _is_invalid_hwnd_error(err: Exception) -> bool:
         text = str(err)
@@ -609,37 +705,44 @@ def run_agent(
         )
 
     def _ensure_hwnd_available() -> bool:
-        nonlocal current_hwnd, last_window_title
+        nonlocal current_hwnd, last_window_title, last_window_class_name, last_window_pid
 
         if window_ctrl.is_window_handle_valid(current_hwnd):
-            title_now = window_ctrl.get_window_title(current_hwnd)
-            if title_now:
-                last_window_title = title_now
+            _refresh_window_signature()
             return True
 
         logger.warning(
             f"[Agent] ⚠️ 检测到窗口句柄失效: {current_hwnd}。"
-            f"3 秒后按标题恢复（标题: {last_window_title or '未知'}）"
+            f"3 秒后按窗口签名恢复（标题: {last_window_title or '未知'}，"
+            f"类名: {last_window_class_name or '未知'}，PID: {last_window_pid or '未知'}）"
         )
         _sleep_interruptible(3.0, should_cancel)
         _check_cancel(should_cancel)
 
-        if not last_window_title:
-            logger.error("[Agent] ❌ 无法恢复窗口句柄：缺少历史窗口标题")
+        if not last_window_title and not last_window_class_name and last_window_pid is None:
+            logger.error("[Agent] ❌ 无法恢复窗口句柄：缺少历史窗口签名")
             return False
 
-        recovered = window_ctrl.find_window_by_title(last_window_title)
+        recovered = _recover_window_handle()
         if recovered is None:
-            logger.error(f"[Agent] ❌ 未找到标题为「{last_window_title}」的窗口，无法继续")
+            logger.error(
+                f"[Agent] ❌ 未找到可恢复窗口（标题: {last_window_title or '未知'}，"
+                f"类名: {last_window_class_name or '未知'}，PID: {last_window_pid or '未知'}），无法继续"
+            )
             return False
 
         old_hwnd = current_hwnd
         current_hwnd = recovered
+        _refresh_window_signature()
         logger.info(f"[Agent] ✅ 句柄恢复成功: {old_hwnd} -> {current_hwnd}")
         return True
 
     # 记录哪些 messages 下标包含图片（用于滑动清理）
     image_msg_indices: list[int] = []
+    runtime_state: dict[str, object] = {
+        "last_scroll_direction": "",
+        "scroll_no_change_streak": 0,
+    }
 
     for step in range(1, max_steps + 1):
         _check_cancel(should_cancel)
@@ -794,6 +897,7 @@ def run_agent(
                 dry_run,
                 img,
                 should_cancel=should_cancel,
+                runtime_state=runtime_state,
             )
         except InterruptedError:
             raise
@@ -809,6 +913,7 @@ def run_agent(
                             dry_run,
                             img,
                             should_cancel=should_cancel,
+                            runtime_state=runtime_state,
                         )
                         logger.info(f"[Agent] 工具重试成功: {tool_name}")
                     except InterruptedError:

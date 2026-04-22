@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 import config
 import window_ctrl
 import booking_flow
-import agent  # 用于提示词的 load_prompt / save_prompt / DEFAULT_SYSTEM_PROMPT
+import agent  # 用于提示词的 load_prompt / save_prompt
 
 # 仅在有真实控制台（python.exe）时才重定向输出流编码；
 # pythonw.exe 运行时 sys.stdout/stderr 为 None，须跳过，否则会静默闪退。
@@ -83,6 +83,9 @@ class BookingApp(tk.Tk):
         self.geometry("680x850")
         self.minsize(600, 750)
         self.target_hwnd = None
+        self.target_window_title = ""
+        self.target_window_class_name = ""
+        self.target_window_pid = None
         self.running = False  # 是否正在执行任务
         self.task_cancelled = False  # 任务取消标记
 
@@ -144,6 +147,11 @@ class BookingApp(tk.Tk):
             row=1, column=0, sticky=tk.W, pady=4)
         ttk.Label(info_frame, text=f"默认时段: {config.BOOKING_START_TIME} - {config.BOOKING_END_TIME}").grid(
             row=1, column=1, sticky=tk.W, padx=20, pady=4)
+        self.lbl_agent_steps = ttk.Label(
+            info_frame,
+            text=f"Agent步数: {getattr(config, 'AGENT_MAX_STEPS', 50)}"
+        )
+        self.lbl_agent_steps.grid(row=1, column=2, sticky=tk.W, padx=10, pady=4)
 
         # ---- 醒目警告提示 ----
         warning_msg = (
@@ -208,11 +216,22 @@ class BookingApp(tk.Tk):
         
         ttk.Label(time_inner, text="(如 08:00 到 22:00)", foreground="gray").pack(side=tk.LEFT, padx=10)
 
-        # 第三行：座位策略二选一
-        ttk.Label(time_frame, text="3. 目标座位策略:").grid(row=2, column=0, sticky=tk.W, pady=4)
+        # 第三行：Agent 最大步数
+        ttk.Label(time_frame, text="3. Agent 最大步数:").grid(row=2, column=0, sticky=tk.W, pady=4)
+        self.ent_max_steps = ttk.Entry(time_frame, width=8)
+        self.ent_max_steps.insert(0, str(getattr(config, "AGENT_MAX_STEPS", 50)))
+        self.ent_max_steps.grid(row=2, column=1, sticky=tk.W, padx=4)
+        ttk.Label(
+            time_frame,
+            text="(1-300，推荐 20-60)",
+            foreground="gray"
+        ).grid(row=2, column=2, sticky=tk.W)
+
+        # 第四行：座位策略二选一
+        ttk.Label(time_frame, text="4. 目标座位策略:").grid(row=3, column=0, sticky=tk.W, pady=4)
 
         seat_mode_frame = ttk.Frame(time_frame)
-        seat_mode_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W)
+        seat_mode_frame.grid(row=3, column=1, columnspan=2, sticky=tk.W)
 
         init_mode = config.SEAT_MODE if config.SEAT_MODE in ("list", "range") else "list"
         self.seat_mode_var = tk.StringVar(value=init_mode)
@@ -234,17 +253,17 @@ class BookingApp(tk.Tk):
         )
         self.rb_seat_mode_range.pack(side=tk.LEFT)
 
-        # 第四行：具体座位列表
-        ttk.Label(time_frame, text="4. 具体座位:").grid(row=3, column=0, sticky=tk.W, pady=4)
+        # 第五行：具体座位列表
+        ttk.Label(time_frame, text="5. 具体座位:").grid(row=4, column=0, sticky=tk.W, pady=4)
         self.ent_seat_list = ttk.Entry(time_frame, width=40)
         self.ent_seat_list.insert(0, ",".join(config.PREFERRED_SEATS))
-        self.ent_seat_list.grid(row=3, column=1, sticky=tk.W, padx=4)
-        ttk.Label(time_frame, text="逗号分隔，如 120,121,122", foreground="gray").grid(row=3, column=2, sticky=tk.W)
+        self.ent_seat_list.grid(row=4, column=1, sticky=tk.W, padx=4)
+        ttk.Label(time_frame, text="逗号分隔，如 120,121,122", foreground="gray").grid(row=4, column=2, sticky=tk.W)
 
-        # 第五行：连续座位段
-        ttk.Label(time_frame, text="5. 座位段:").grid(row=4, column=0, sticky=tk.W, pady=4)
+        # 第六行：连续座位段
+        ttk.Label(time_frame, text="6. 座位段:").grid(row=5, column=0, sticky=tk.W, pady=4)
         seat_range_frame = ttk.Frame(time_frame)
-        seat_range_frame.grid(row=4, column=1, columnspan=2, sticky=tk.W)
+        seat_range_frame.grid(row=5, column=1, columnspan=2, sticky=tk.W)
 
         self.ent_seat_range_start = ttk.Entry(seat_range_frame, width=8)
         self.ent_seat_range_start.insert(0, config.SEAT_RANGE_START)
@@ -262,7 +281,7 @@ class BookingApp(tk.Tk):
             time_frame, text="💾 保存并设置为默认",
             command=self._save_config_to_env
         )
-        self.btn_save_config.grid(row=5, column=1, columnspan=2, sticky=tk.E, pady=(6, 0))
+        self.btn_save_config.grid(row=6, column=1, columnspan=2, sticky=tk.E, pady=(6, 0))
 
         # 操作区
         act_frame = ttk.LabelFrame(frame, text="操作", padding=8)
@@ -305,6 +324,9 @@ class BookingApp(tk.Tk):
             "  {seat_targets}  → 完整目标座位列表/座位段展开列表\n"
             "  {seat_mode_desc} → 当前座位策略说明（列表或座位段）\n"
             "  {start_time} → 预约开始时间     {end_time} → 预约结束时间\n"
+            "• 默认提示词来源：default_system_prompt.txt（通过 Git 同步维护）。\n"
+            "• 点击保存后将写入 user_system_promote.txt，存在该文件时会优先使用用户提示词。\n"
+            "• 若默认提示词文件缺失或损坏，程序会直接报错，请重新拉取或下载项目。\n"
             "• 不同学校/楼栋的座位图布局不同，请根据实际情况修改步骤描述。\n"
             "• 保存后下次点击「预约」时立刻生效，无需重启程序。"
         )
@@ -323,7 +345,13 @@ class BookingApp(tk.Tk):
         self.txt_prompt.pack(fill=tk.BOTH, expand=True)
 
         # 加载当前提示词
-        current_prompt = agent.load_prompt()
+        try:
+            current_prompt = agent.load_prompt()
+        except Exception as e:
+            current_prompt = ""
+            err_msg = f"{e}\n\n请重新拉取 Git 仓库或重新下载完整项目。"
+            logger.error(f"加载提示词失败: {e}")
+            messagebox.showerror("提示词文件异常", err_msg)
         self.txt_prompt.insert("1.0", current_prompt)
 
         # 按钮行
@@ -336,14 +364,14 @@ class BookingApp(tk.Tk):
         ).pack(side=tk.LEFT, padx=4)
 
         ttk.Button(
-            btn_frame, text="🔄  恢复内置默认",
+            btn_frame, text="↩  返回默认（删除自定义）",
             command=self._reset_prompt
         ).pack(side=tk.LEFT, padx=4)
 
         # 右侧文件路径提示
         ttk.Label(
             btn_frame,
-            text=f"保存路径: system_prompt.txt",
+            text="用户保存路径: user_system_promote.txt   默认来源: default_system_prompt.txt",
             foreground="gray", font=("Microsoft YaHei", 8)
         ).pack(side=tk.RIGHT, padx=8)
 
@@ -354,27 +382,39 @@ class BookingApp(tk.Tk):
             messagebox.showwarning("提示", "提示词不能为空！")
             return
         if agent.save_prompt(text):
-            messagebox.showinfo("保存成功", "✅ 提示词已保存！\n下次点击预约按钮时立刻生效。")
-            logger.info("用户已保存自定义提示词")
+            messagebox.showinfo(
+                "保存成功",
+                "✅ 提示词已保存到 user_system_promote.txt！\n后续将优先使用你的自定义提示词。"
+            )
+            logger.info("用户已保存自定义提示词（user_system_promote.txt）")
         else:
             messagebox.showerror("保存失败", "❌ 写入文件失败，请检查目录权限。")
 
     def _reset_prompt(self):
-        """恢复内置默认提示词（覆盖编辑器内容，并自动保存）"""
+        """恢复默认来源提示词（删除用户提示词文件）。"""
         if not messagebox.askyesno(
-            "确认恢复", "此操作将用内置默认提示词覆盖编辑器中的内容，是否继续？"
+            "确认恢复",
+            "此操作将删除用户提示词 user_system_promote.txt，恢复使用 default_system_prompt.txt，是否继续？"
         ):
             return
+
+        try:
+            default_prompt = agent.load_default_prompt()
+        except Exception as e:
+            logger.error(f"恢复默认提示词失败: {e}")
+            messagebox.showerror("默认提示词缺失", f"{e}\n\n请重新拉取 Git 仓库或重新下载完整项目。")
+            return
+
         self.txt_prompt.delete("1.0", tk.END)
-        self.txt_prompt.insert("1.0", agent.DEFAULT_SYSTEM_PROMPT)
-        # 同时删除文件，让 load_prompt 下次退回默认
+        self.txt_prompt.insert("1.0", default_prompt)
+        # 删除用户提示词文件，让 load_prompt 下次回到默认来源
         if os.path.exists(agent.PROMPT_FILE):
             try:
                 os.remove(agent.PROMPT_FILE)
             except Exception as e:
                 logger.warning(f"删除提示词文件失败: {e}")
-        logger.info("已恢复内置默认提示词")
-        messagebox.showinfo("已恢复", "✅ 已恢复内置默认提示词。")
+        logger.info("已清除用户提示词，恢复默认来源 default_system_prompt.txt")
+        messagebox.showinfo("已恢复", "✅ 已恢复默认来源提示词（default_system_prompt.txt）。")
 
     # ============================================================
     # 窗口抓取逻辑
@@ -409,6 +449,9 @@ class BookingApp(tk.Tk):
 
             self.target_hwnd = root_hwnd
             title_disp = title if title else "无标题"
+            self.target_window_title = title_disp if title_disp != "无标题" else ""
+            self.target_window_class_name = window_ctrl.get_window_class_name(root_hwnd)
+            self.target_window_pid = window_ctrl.get_window_process_id(root_hwnd)
             self.lbl_window.config(
                 text=f"【已锁定 - 请确认窗口标题是否和预约窗口一致】{title_disp} (句柄: {root_hwnd}, 尺寸: {w}x{h})",
                 foreground="green"
@@ -466,14 +509,23 @@ class BookingApp(tk.Tk):
         trigger_v = self.ent_trigger.get().strip()
         start_v = self.ent_start.get().strip()
         end_v = self.ent_end.get().strip()
+        max_steps_v = self.ent_max_steps.get().strip() if hasattr(self, "ent_max_steps") else ""
         mode = self.seat_mode_var.get().strip().lower() if hasattr(self, "seat_mode_var") else "list"
 
         if mode not in ("list", "range"):
             messagebox.showwarning("提示", "座位策略无效，请在“具体座位”和“座位段”中二选一。")
             return
 
-        if not all([trigger_v, start_v, end_v]):
+        if not all([trigger_v, start_v, end_v, max_steps_v]):
             messagebox.showwarning("提示", "所有参数均不能为空！")
+            return
+
+        try:
+            max_steps_num = int(max_steps_v)
+            if not (1 <= max_steps_num <= 300):
+                raise ValueError
+        except Exception:
+            messagebox.showwarning("格式错误", "Agent 最大步数应为 1-300 的整数。")
             return
         
         # 简单校验格式
@@ -528,6 +580,7 @@ class BookingApp(tk.Tk):
                 "TRIGGER_TIME": trigger_v,
                 "BOOKING_START_TIME": start_v,
                 "BOOKING_END_TIME": end_v,
+                "AGENT_MAX_STEPS": str(max_steps_num),
                 "SEAT_MODE": mode,
                 "PREFERRED_SEATS": seat_list_value,
                 "SEAT_RANGE_START": range_start_v,
@@ -556,6 +609,7 @@ class BookingApp(tk.Tk):
             config.TRIGGER_TIME = trigger_v
             config.BOOKING_START_TIME = start_v
             config.BOOKING_END_TIME = end_v
+            config.AGENT_MAX_STEPS = max_steps_num
             config.SEAT_MODE = mode
             if list_backup:
                 config.PREFERRED_SEATS = list_backup
@@ -566,9 +620,14 @@ class BookingApp(tk.Tk):
 
             if hasattr(self, "lbl_seat_config"):
                 self.lbl_seat_config.config(text=f"座位: {seat_display}")
+            if hasattr(self, "lbl_agent_steps"):
+                self.lbl_agent_steps.config(text=f"Agent步数: {max_steps_num}")
 
-            logger.info(f"配置已保存到 .env 文件（座位策略：{seat_display}）")
-            messagebox.showinfo("保存成功", f"✅ 配置已永久保存！\n当前座位策略：{seat_display}\n下次启动将默认使用。")
+            logger.info(f"配置已保存到 .env 文件（座位策略：{seat_display}，最大步数：{max_steps_num}）")
+            messagebox.showinfo(
+                "保存成功",
+                f"✅ 配置已永久保存！\n当前座位策略：{seat_display}\nAgent 最大步数：{max_steps_num}\n下次启动将默认使用。"
+            )
         except Exception as e:
             logger.error(f"保存失败: {e}")
             messagebox.showerror("保存失败", f"❌ 无法写入文件：\n{e}")
@@ -583,6 +642,8 @@ class BookingApp(tk.Tk):
         self.ent_trigger.config(state=state)
         self.ent_start.config(state=state)
         self.ent_end.config(state=state)
+        if hasattr(self, 'ent_max_steps'):
+            self.ent_max_steps.config(state=state)
         if hasattr(self, 'rb_seat_mode_list'):
             self.rb_seat_mode_list.config(state=state)
         if hasattr(self, 'rb_seat_mode_range'):
@@ -654,6 +715,15 @@ class BookingApp(tk.Tk):
         if self.running:
             return
 
+        max_steps_text = self.ent_max_steps.get().strip() if hasattr(self, "ent_max_steps") else ""
+        try:
+            max_steps = int(max_steps_text)
+            if not (1 <= max_steps <= 300):
+                raise ValueError
+        except Exception:
+            messagebox.showwarning("格式错误", "Agent 最大步数应为 1-300 的整数。")
+            return
+
         self.running = True
         self.task_cancelled = False
         self.set_buttons_state(tk.DISABLED)
@@ -666,10 +736,10 @@ class BookingApp(tk.Tk):
             h, m = 6, 0 # 兜底
 
         threading.Thread(
-            target=self._task_thread, args=(dry_run, schedule, h, m), daemon=True
+            target=self._task_thread, args=(dry_run, schedule, h, m, max_steps), daemon=True
         ).start()
 
-    def _task_thread(self, dry_run: bool, use_schedule: bool, t_hour: int, t_min: int):
+    def _task_thread(self, dry_run: bool, use_schedule: bool, t_hour: int, t_min: int, max_steps: int):
         try:
             if use_schedule:
                 self._wait_until_trigger(t_hour, t_min)
@@ -680,6 +750,7 @@ class BookingApp(tk.Tk):
             start_time = self.ent_start.get().strip() or config.BOOKING_START_TIME
             end_time   = self.ent_end.get().strip()   or config.BOOKING_END_TIME
             logger.info(f"预约时间段: {start_time} ~ {end_time}")
+            logger.info(f"Agent 最大步数: {max_steps}")
 
             success = booking_flow.run_booking(
                 self.target_hwnd,
@@ -687,6 +758,10 @@ class BookingApp(tk.Tk):
                 start_time=start_time,
                 end_time=end_time,
                 should_cancel=lambda: self.task_cancelled,
+                max_steps=max_steps,
+                target_window_title=self.target_window_title,
+                target_window_class_name=self.target_window_class_name,
+                target_window_pid=self.target_window_pid,
             )
 
             if success:
