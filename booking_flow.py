@@ -8,6 +8,7 @@
 """
 import logging
 from typing import Callable
+import config
 import agent  # 导入智能 Agent 模块
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,10 @@ def run_booking(
     start_time: str | None = None,
     end_time: str | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    max_steps: int | None = None,
+    target_window_title: str | None = None,
+    target_window_class_name: str | None = None,
+    target_window_pid: int | None = None,
 ) -> bool:
     """
     执行完整的自习室预约流程（委托给 agent.run_agent）。
@@ -33,6 +38,10 @@ def run_booking(
         start_time: 预约开始时间字符串（如 "8:00"），None 则读 config
         end_time:   预约结束时间字符串（如 "22:00"），None 则读 config
         should_cancel: 外部停止检查函数，返回 True 时中断任务
+        max_steps:  Agent 最大循环步数，None 则读 config.AGENT_MAX_STEPS
+        target_window_title: 目标窗口标题，用于句柄恢复
+        target_window_class_name: 目标窗口类名，用于句柄恢复
+        target_window_pid: 目标窗口 PID，用于句柄恢复
 
     Returns:
         bool: 是否成功完成预约
@@ -43,5 +52,9 @@ def run_booking(
         dry_run=dry_run,
         start_time=start_time,
         end_time=end_time,
+        max_steps=max_steps if max_steps is not None else config.AGENT_MAX_STEPS,
         should_cancel=should_cancel,
+        target_window_title=target_window_title,
+        target_window_class_name=target_window_class_name,
+        target_window_pid=target_window_pid,
     )

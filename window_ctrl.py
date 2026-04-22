@@ -11,6 +11,7 @@ import win32gui
 import win32con
 import win32api
 import win32ui
+import win32process
 from PIL import Image
 import io
 
@@ -36,6 +37,99 @@ def get_window_title(hwnd: int) -> str:
         return win32gui.GetWindowText(hwnd).strip()
     except Exception:
         return ""
+
+
+def get_window_class_name(hwnd: int) -> str:
+    """安全获取窗口类名；句柄无效时返回空字符串。"""
+    if not is_window_handle_valid(hwnd):
+        return ""
+    try:
+        return win32gui.GetClassName(hwnd).strip()
+    except Exception:
+        return ""
+
+
+def get_window_process_id(hwnd: int) -> int | None:
+    """安全获取窗口所属进程 PID；句柄无效或获取失败时返回 None。"""
+    if not is_window_handle_valid(hwnd):
+        return None
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return int(pid) if pid else None
+    except Exception:
+        return None
+
+
+def find_window_for_recovery(
+    title: str,
+    class_name: str = "",
+    process_id: int | None = None,
+) -> int | None:
+    """
+    按窗口“签名”恢复句柄（进程 > 类名 > 标题，综合评分）。
+
+    适用于窗口句柄因“重新进入小程序”等操作被重建后的恢复。
+    """
+    target_title = (title or "").strip()
+    target_class = (class_name or "").strip()
+    target_pid = int(process_id) if process_id else None
+
+    candidates: list[tuple[int, int, int]] = []
+
+    def _enum(hwnd, _):
+        if not win32gui.IsWindow(hwnd):
+            return
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+
+        try:
+            cur_title = win32gui.GetWindowText(hwnd).strip()
+        except Exception:
+            cur_title = ""
+
+        try:
+            cur_class = win32gui.GetClassName(hwnd).strip()
+        except Exception:
+            cur_class = ""
+
+        try:
+            _, cur_pid_raw = win32process.GetWindowThreadProcessId(hwnd)
+            cur_pid = int(cur_pid_raw) if cur_pid_raw else None
+        except Exception:
+            cur_pid = None
+
+        score = 0
+        if target_pid is not None and cur_pid == target_pid:
+            score += 100
+        if target_class and cur_class == target_class:
+            score += 40
+        if target_title:
+            if cur_title == target_title:
+                score += 30
+            elif cur_title and (target_title in cur_title or cur_title in target_title):
+                score += 10
+
+        if score <= 0:
+            return
+
+        try:
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            area = max(0, right - left) * max(0, bottom - top)
+        except Exception:
+            area = 0
+
+        candidates.append((score, area, hwnd))
+
+    try:
+        win32gui.EnumWindows(_enum, None)
+    except Exception:
+        return None
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return candidates[0][2]
 
 
 def find_window_by_title(title: str) -> int | None:

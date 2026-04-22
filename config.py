@@ -19,6 +19,18 @@ MODEL_NAME = "qwen3.5-plus"
 # False = 直接输出工具调用，速度快，适合网络好/情况简单的预约场景
 AGENT_ENABLE_THINKING = True
 
+# Agent 最大步数（安全上限，防止流程异常时无限循环）
+# 可在 GUI 中设置并保存到 .env
+try:
+    AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "50"))
+except Exception:
+    AGENT_MAX_STEPS = 50
+
+if AGENT_MAX_STEPS < 1:
+    AGENT_MAX_STEPS = 1
+elif AGENT_MAX_STEPS > 300:
+    AGENT_MAX_STEPS = 300
+
 # ==================== 座位偏好配置 ====================
 def _parse_seat_list(raw: str | None) -> list[str]:
     """解析座位字符串（逗号/空格分隔），并去重保序。"""
